@@ -1,0 +1,82 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: fraud_triage
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # The 4 app services below (project-plan.md's Dockerfiles slice, chat
+  # added in Q78) each build from their own service directory's Dockerfile
+  # (mcp-servers/Dockerfile, backend/Dockerfile, admin/Dockerfile,
+  # chat/Dockerfile -- split into separate files by explicit request,
+  # each installing the same full locked dependency set rather than a
+  # shared multi-stage base). Build context is ".." for all 4 since every
+  # service needs agents/, ml/, etc., not just its own directory.
+  # DynamoDB/S3/OpenSearch Serverless stay real AWS, not LocalStack (Q51) --
+  # only mcp-server needs the explicit AWS_* keys from ../.env (see that
+  # file's comment: mounting ~/.aws into a container doesn't work on this
+  # machine's credential setup, confirmed for real, not assumed).
+  mcp-server:
+    build:
+      context: ..
+      dockerfile: mcp-servers/Dockerfile
+    env_file: ../.env
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/fraud_triage
+    ports:
+      - "8001:8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  backend:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    env_file: ../.env
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/fraud_triage
+      MCP_SERVER_HOST: mcp-server
+    ports:
+      - "8002:8002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mcp-server:
+        condition: service_started
+
+  admin:
+    build:
+      context: ..
+      dockerfile: admin/Dockerfile
+    env_file: ../.env
+    environment:
+      BACKEND_URL: http://backend:8002
+    ports:
+      - "8501:8501"
+    depends_on:
+      backend:
+        condition: service_started
+
+  chat:
+    build:
+      context: ..
+      dockerfile: chat/Dockerfile
+    env_file: ../.env
+    environment:
+      BACKEND_URL: http://backend:8002
+    ports:
+      - "8503:8503"
+    depends_on:
+      backend:
+        condition: service_started

@@ -1,0 +1,108 @@
+E-COMMERCE RETURNS, REFUNDS & FRAUD TRIAGE
+Multi-Agent System -- Project Summary
+=====================================
+
+1. PROBLEM STATEMENT
+---------------------
+Every return/refund request an e-commerce business receives carries two
+risks pulling in opposite directions: approve too loosely and fraudulent
+or abusive claims drain margin; deny or stall too readily and legitimate
+customers are lost.
+
+Resolving a claim well requires weighing photo evidence of the item
+against the customer's stated reason, scoring the request for fraud risk
+from the customer's order and account history, and reaching an
+approve/deny/escalate decision against the company's actual written
+refund policy -- with a design guarantee that no single AI judgment
+(a vision call, a fraud score) is ever allowed to move money on its own,
+and that a human reviewer stays in the loop for anything ambiguous or
+high-value.
+
+This project builds that triage system as four cooperating AI agents,
+with every tool call the agents make routed through a single MCP server,
+and the final money-moving action gated behind a non-bypassable,
+deterministic check -- not an LLM's own discretion.
+
+2. ARCHITECTURE
+----------------
+Four agents, each with a narrow, verifiable job:
+
+  - Orchestrator: resolves the customer's raw identifier to an opaque
+    customer_ref (the only place a raw email/customer ID is ever
+    touched), extracts claim details from the customer's message across
+    as many messages as it takes (asking a follow-up question for
+    whatever's still missing), and is the only caller of issue_refund --
+    gated on a real Decision Agent verdict, never called on its own
+    judgment.
+  - Image Parsing Agent: redacts incidental faces/text from a claim
+    photo, then judges whether it's consistent with the customer's
+    description and the ordered product -- a real vision-model call, not
+    a template answer.
+  - Fraud Scoring Agent: assembles thirteen real features (account age,
+    order/return history, claim frequency, address match, refund amount,
+    etc.) and calls a trained, calibrated ML model for a risk band --
+    the model decides the risk, not the agent.
+  - Decision Agent: retrieves the relevant refund-policy clause via
+    semantic search, and reports a real, deterministic decision-matrix
+    lookup as its verdict -- never inventing an approve/deny/escalate
+    label of its own.
+
+Grounding, not trust: every agent's most consequential output (the
+fraud risk band, the photo-consistency verdict, the approve/deny/
+escalate decision) is computed by a real tool -- a trained model, a
+vision API call, a lookup table -- and a guardrail on each agent's task
+verifies the agent reported that real result rather than inventing a
+plausible-sounding one. This was not a theoretical concern: agents were
+caught fabricating a verdict when an underlying tool call silently
+failed, more than once, during development -- the guardrails exist
+because that failure mode is real, not hypothetical.
+
+PII boundary: a customer's raw identifying information never reaches
+any agent's LLM context, under any circumstances. The only place a raw
+identifier is read is the one resolution step that converts it to an
+opaque customer_ref; every tool, every prompt, and every trace from
+that point on uses the ref, never the raw string.
+
+Non-bypassable write path: issue_refund lives on the shared MCP server
+behind a bearer-token gate that only the Orchestrator's own token can
+pass. A human reviewer's override flows through the exact same call --
+there is one write path into the refund system, not one per caller.
+
+Data flow: customer message -> Orchestrator (intake) -> Image Parsing
+(if the claim category needs a photo) -> Fraud Scoring -> Decision Agent
+-> Orchestrator applies the verdict. A missing required photo stops the
+pipeline early and re-prompts the customer rather than guessing.
+
+3. TECHNOLOGIES USED
+---------------------
+Built and verified for real (not mocked) as of this writing:
+
+  - Python, CrewAI (Agent/Task/Crew/Flow) for the agent framework and
+    orchestration logic
+  - FastMCP for the single consolidated MCP server exposing every tool
+    call the agents make
+  - FastAPI for the HTTP backend wrapping the agent pipeline
+  - Azure OpenAI (GPT-4.1 mini) for the Orchestrator, Image Parsing, and
+    Fraud Scoring agents' reasoning and vision calls
+  - Ollama (DeepSeek-R1 8B, local) for the Decision Agent -- the one
+    agent kept fully offline by design
+  - scikit-learn, XGBoost, LightGBM, CatBoost, and MLflow for training,
+    comparing, calibrating, and registering the fraud-risk model
+  - SHAP for grounding the fraud model's stated key signals in real
+    feature-attribution values
+  - OpenCV and EasyOCR for real face/text redaction on claim photos
+    before any vision model ever sees them
+  - OpenSearch Serverless (AWS) for the refund-policy RAG vector store,
+    with Azure OpenAI text-embedding-3-small for embeddings
+  - Postgres (customers, refund transactions, seeded account profiles),
+    DynamoDB (conversation state, claim-frequency counters), and S3
+    (claim photos, chat transcripts), all on real AWS
+  - DummyJSON (order/product data) and TrackingMore (shipment status)
+    as the external order-management/tracking APIs
+  - pytest for the test suite (real integration tests against live
+    services throughout -- no mocking), uv for dependency management
+  - Streamlit frontend (customer-facing chat and an internal Admin +
+    Reviewer Dashboard app)
+  - Langfuse for prompt/tool-call/cost observability across the pipeline
+  - Docker images for the MCP server and FastAPI backend, and the
+    CodeBuild/CodeDeploy CI/CD pipeline to ECS/Fargate

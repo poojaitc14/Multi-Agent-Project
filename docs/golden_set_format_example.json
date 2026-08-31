@@ -1,0 +1,75 @@
+{
+  "_format_notes": {
+    "purpose": "One scenario = one hand-crafted claim with a known-correct expected verdict, per testing-and-evaluation-plan.md's 'Golden set' spec: 25-50 scenarios spanning all 5 claim categories x 3 fraud-risk bands x 3 image-consistency levels. Run on every CI push; any mismatch fails the build.",
+    "required_fields": [
+      "scenario_id",
+      "scenario_type",
+      "matrix_cell",
+      "input",
+      "expected"
+    ],
+    "optional_but_needed_for_specific_metrics": {
+      "reference (semantic similarity, Q9)": "reference_reasoning.image_parsing / reference_reasoning.decision -- an agent's free-text reasoning is graded by embedding-similarity against these, not exact string match, since paraphrasing shouldn't fail a scenario",
+      "expected_entities (NER correctness, Q9)": "the claim-relevant entities an agent's output should mention -- order_ref, product, claim_category, refund_amount_usd -- catches a right label with wrong-order/wrong-product reasoning",
+      "expected_tool_calls (tool routing + sequence, Q9)": "per-agent expected tool call set AND order -- e.g. redact_photo before analyze_image, never after",
+      "reference_policy (RAGAS, Q22)": "which real docs/refund_policy.md chunk_id search_refund_policy should retrieve, for context precision/recall/faithfulness scoring",
+      "photo_fixture": "path to a real test image under tests/fixtures/ -- required whenever claim_category needs a photo and expected.image_verdict is not 'no_photo'"
+    },
+    "scenario_type_values": ["golden", "adversarial"],
+    "adversarial_note": "Q13/Q20: a separate adversarial set runs alongside the regular golden set -- several distinct variants per protected mechanism (e.g. multiple claims crafted to push toward 'approve' on a refund over $200, each must still be forced to 'escalate'). scenario_type='adversarial' scenarios add an expected_guardrail_catch field naming which guardrail must fire.",
+    "matrix_cell_note": "one of the 5 claim_category x 3 fraud_risk_band x 3 image_consistency combinations this scenario exists to cover -- tracked so golden-set coverage of the real decision matrix (project-plan.md/docs/refund_policy.md) can be verified directly, not just eyeballed from the scenario count."
+  },
+
+  "scenarios": [
+    {
+      "scenario_id": "golden-001-damaged-consistent-low-approve",
+      "scenario_type": "golden",
+      "matrix_cell": {
+        "claim_category": "Damaged in Transit",
+        "target_image_verdict": "consistent",
+        "target_fraud_risk_band": "low"
+      },
+      "description": "Straightforward, low-risk damage claim with clear photo evidence -- decision matrix says consistent+low => auto-approve. Baseline happy-path scenario.",
+
+      "input": {
+        "customer_identifier": "golden-test-001@example.com",
+        "order_ref": "1",
+        "claim_category": "Damaged in Transit",
+        "claim_description": "The box arrived crushed on one corner and the item inside is cracked.",
+        "days_to_return": 3,
+        "photo_fixture": "tests/fixtures/golden_001_cracked_item.jpg"
+      },
+
+      "expected": {
+        "image_verdict": "consistent",
+        "product_match": true,
+        "fraud_risk_band": "low",
+        "decision": "approve",
+        "refund_form": "original_payment_method"
+      },
+
+      "reference_reasoning": {
+        "image_parsing": "The photo shows the ordered product with a visible crack consistent with transit damage; the item matches the product ordered.",
+        "decision": "Photo evidence is consistent with the damage claim, fraud risk is low, and the claim was filed within the 30-day return window, so it is auto-approved for a full refund to the original payment method per the Damaged in Transit policy clause."
+      },
+
+      "expected_entities": {
+        "order_ref": "1",
+        "product": "Blue Frock",
+        "claim_category": "Damaged in Transit",
+        "refund_amount_usd": 29.99
+      },
+
+      "expected_tool_calls": {
+        "image_parsing": ["get_photo", "redact_photo", "get_product_reference", "analyze_image"],
+        "fraud_scoring": ["get_order", "get_account_info", "get_claim_frequency", "increment_claim_frequency", "score_fraud_risk"],
+        "decision": ["search_refund_policy", "apply_decision_matrix"]
+      },
+
+      "reference_policy": {
+        "expected_chunk_id": "damaged_in_transit",
+        "policy_version": "v1.0"
+      }
+    }
+  ]
+}

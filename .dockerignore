@@ -1,0 +1,28 @@
+.venv/
+.git/
+.pytest_cache/
+.claude/
+__pycache__/
+*.pyc
+.env
+.env.example
+
+# ml/mlruns is 434MB, gitignored, and machine-local -- the full experiment
+# tracking store, not just the one model actually served. The MCP server
+# image bakes in ml/production_model instead (project-plan.md's Dockerfiles
+# slice), a small (82KB), committed, self-contained export of just the
+# registered production model -- see ml/fraud_attribution.py's comment for
+# how it's produced. Do NOT add a blanket "*.txt"/"*.md" rule here: that
+# would wrongly exclude ml/production_model/requirements.txt, which is part
+# of the artifact MLflow saved, not documentation.
+ml/mlruns/
+ml/catboost_info/
+ml/.ipynb_checkpoints/
+ml/*.joblib
+
+tests/
+docs/
+README.md
+project-plan.md
+project-summary.txt
+testing-and-evaluation-plan.md

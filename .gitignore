@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.pytest_cache/
+ml/data/*.csv
+!ml/data/.gitkeep
+ml/*.joblib
+ml/.ipynb_checkpoints/
+ml/mlruns/

@@ -1,0 +1,169 @@
+# E-commerce Returns, Refunds & Fraud Triage — Testing & Evaluation Plan
+
+## Context
+
+`project-plan.md` decided *that* the project needs both unit tests and an eval harness (Q18), but not the details of how each is scoped, sized, or gated. This document works out those details the same way the rest of the plan was built — a short interview, one question at a time, decisions recorded as they're made. Nothing here is implemented; it's the specification testing code will be written against later.
+
+## Testing & Evaluation Interview Log
+
+1. **Q: Which testing layers should this plan define in detail?**
+   A: All four — **unit tests**, **integration tests**, **end-to-end UI tests**, and **security/policy-bypass tests**.
+
+2. **Q: How should the Decision Agent scenario harness (named but not designed in project-plan.md Q18) actually work?**
+   A: **Golden set + property tests** — a curated set of claims with expected verdicts, plus randomized/generated claims checked against invariants (e.g. "refund amount > $200 always escalates") rather than an exact expected verdict.
+
+3. **Q: What acceptance bar should the trained fraud model need to clear before it's considered ready to ship (build-guide Step 5)?**
+   A: **No fixed floor set in advance.** The final model will be chosen by judgment after training and comparing all 5 candidates (Logistic Regression, Random Forest, XGBoost, LightGBM, CatBoost) against each other — not against a pre-committed numeric threshold. See "Open items" below.
+
+4. **Q: Testing framework/tooling for the Python side?**
+   A: **pytest**, with MCP servers and DB/API calls mocked via fixtures for unit tests — fast, no external dependencies required to run the unit suite.
+
+5. **Q: Golden-set size and composition?**
+   A: A **larger curated set — 25 to 50 claims** — covering all five claim categories (Damaged in Transit, Wrong Item Received, Not as Described, Defective/DOA, Change of Mind) crossed with risk bands, not just one claim per decision-matrix cell.
+
+6. **Q: The Image Parsing and Decision agents are LLM-driven, so outputs can vary run to run — how should tests handle that?**
+   A: **Pin deterministic settings (temperature = 0)** for agent LLM calls during test runs, so the same input reliably produces the same output.
+
+7. **Q: Should the CI test gate (GitHub Actions, project-plan.md Q26) block on any failure, or allow advisory-only layers?**
+   A: **All layers block.** Unit, integration, golden-set/property, and security tests must all pass before CodeBuild proceeds — no advisory-only layer. **Revised by Q12** — "block" still holds for every layer, but not all of them run on every push; see below.
+
+8. **Q (user-added mid-conversation): Customer PII must never reach an LLM (project-plan.md Q27) — how does this get tested?**
+   A: Add a dedicated **PII isolation** layer: assert no MCP tool response bound for agent LLM context contains a raw name/email/phone/address/payment field; assert `customer_ref`/`order_ref` tokens are used throughout agent-visible data instead; assert `redact_photo` runs before every vision-model call, for both GPT-4.1 mini and Llama 3.2 Vision; assert the Reviewer Dashboard's human-facing view is an explicit, documented exemption rather than an accidental leak. This layer blocks CI like every other layer (per Q7).
+
+9. **Q (user-added mid-conversation): Beyond pass/fail verdicts, what should the golden-set/eval harness actually measure about each agent's behavior?**
+   A: Four specific techniques — **tool routing accuracy** (did the agent call the right tools), **semantic similarity** for comparing free-text answers (not exact string match), **named entity recognition** (entity-level correctness, and a second PII-leak check on free text), and **tool call sequence** validation (right tools in the right order, not just the right set).
+
+10. **Q (user-added mid-conversation): How should the 5 fraud-model candidates be tracked and compared (project-plan.md Q29) — does this change the evaluation plan?**
+    A: Yes — every candidate is now logged to **MLflow** as its own run rather than compared by eye, and the promoted `Production` model in the MLflow Model Registry becomes the regression baseline for future retraining. This doesn't resolve the still-open numeric floor question (Q3), but it removes the previous blocker: a floor can be layered on as a promotion gate later without re-running training, since every candidate's full run history is already preserved.
+
+11. **Q (user-added mid-conversation): Should customer-identifiable information be stored in Langfuse (project-plan.md Q30) — how does this get tested?**
+    A: Extend the **PII isolation** layer (Q8) to Langfuse's traces specifically: assert every trace's `user_id`/`session_id` is a `customer_ref`/`claim_ref`, never a raw customer ID/email; assert no trace attaches an unredacted photo. The rest of what Langfuse records is already covered by the existing payload/prompt scans, since Langfuse observes the same de-identified data those scans already check.
+
+12. **Q (from project-review suggestions, revises Q7): The golden-set/property harness calls real local Ollama models — can that actually run on a hosted GitHub Actions runner, on every push/PR?**
+    A: **No — split the gate.** Unit, integration, security, and PII-isolation tests need no real LLM (they mock tool calls) and keep blocking every push/PR exactly as Q7 decided. The golden-set/property eval harness moves to a nightly schedule plus a required run immediately before deploy, rather than every push — hosted runners don't have the RAM/GPU to pull and run three local 8B models per PR. "All layers block" still holds in the sense that nothing skips its gate entirely; only the *frequency* of the LLM-dependent layer changes. See "CI gate policy" below and `project-plan.md` Q38.
+
+13. **Q (user-added mid-conversation): Should cost and guardrail effectiveness be part of evaluation, not just correctness?**
+    A: **Yes — add both** as agent evaluation metrics alongside tool routing accuracy, semantic similarity, NER, and tool call sequence (Q9): **cost tracking** (token usage and $ cost per claim, per agent/model, surfaced from every golden-set run) and **safety/guardrails** (adversarial scenarios that specifically try to trip the Q28 guardrails and the non-bypassable `issue_refund` gate, run alongside the regular golden set). See "Agent evaluation metrics" below.
+
+14. **Q (closing an open item): Should the fraud model's acceptance floor be set now or later?**
+    A: **After real training results exist.** The floor itself stays undecided, but the *policy* is now settled — it's a deliberate deferral to Build Guide Step 5's actual output, not an oversight.
+
+15. **Q (closing an open item): Should the unit test layer track a numeric code-coverage target?**
+    A: **No — not tracked at all.** Relies on the defined test layers (unit/integration/security/PII/golden-set) rather than a coverage percentage.
+
+16. **Q (closing an open item): What's the enumerated scenario list for the security/bypass test layer?**
+    A: Four scenarios: **malformed/injected tool-call arguments**, **cross-server access attempts** (a non-Orchestrator agent's MCP client trying to reach `issue_refund` directly), **prompt-injection via claim text**, and **replay/idempotency abuse** (resubmitting an old approved verdict/payload to try to trigger a second refund). See "Security / bypass tests" below.
+
+17. **Q (closing an open item): Which embedding model and NER library for the semantic-similarity/NER metrics (Q9)?**
+    A: **A hosted embeddings/NER API.** Flagged, not fully closed: this introduces a third-party data flow that needs its own review against the Q27 "no PII to any LLM, under any circumstances" rule before a specific service is chosen — the same kind of review GPT-4.1 mini already went through. Which specific service, and how the redacted eval text clears that review, is still open.
+
+18. **Q (closing an open item): What are the similarity/entity-match thresholds for those metrics?**
+    A: **Calibrate against real outputs first** — run the golden set once, look at the actual score distribution, and set thresholds from what "clearly right" vs. "clearly wrong" looks like in practice rather than guessing a number now.
+
+19. **Q (closing an open item): What counts as a cost regression worth acting on (Q13)?**
+    A: **Nothing — purely informational.** Cost/token per claim is tracked and reported every run, but no automated gate or ceiling is enforced, consistent with `project-plan.md` Q23's "don't optimize for cost" stance.
+
+20. **Q (closing an open item): How large should the adversarial guardrail scenario set (Q13) be?**
+    A: **Several variants per guardrail/gate** — multiple distinct adversarial angles against each protected mechanism (the >$200 escalate rule, the `key_signals` feature-vocabulary check, the `issue_refund` gate), not just one token case per mechanism.
+
+21. **Q (from project-review suggestions): Should the pipeline latency target be set now or after measuring real hardware?**
+    A: **Benchmark first**, matching `project-plan.md` Q49 — run a real throughput test against the target hardware before setting a target response time; still unset until that measurement exists.
+
+22. **Q (user-added mid-conversation, change of plan): The Decision Agent's policy lookup is now RAG-based (`project-plan.md` Q50) — how does retrieval quality get evaluated, separately from the final verdict?**
+    A: **RAGAS.** Each golden-set scenario's `search_refund_policy` call is scored on four RAGAS metrics: **context precision** and **context recall** (did retrieval surface the chunk(s) actually relevant to this claim, and only those), **faithfulness** (does the Decision Agent's verdict rationale stick to what the retrieved chunks actually say, rather than adding unsupported policy claims), and **answer relevancy** (does the rationale actually address the claim at hand). This is a new dimension on top of the four existing process metrics (Q9) — a verdict can cite the right chunks yet still misstate them, or cite the wrong chunks and still land on the right label by luck; RAGAS is what catches both. See "RAG evaluation" below.
+
+## Testing & Evaluation Plan (synthesis)
+
+### Test layers
+
+| Layer | Scope | Runs against |
+|---|---|---|
+| **Unit tests** | Each MCP tool handler, the fraud model wrapper, agent task/prompt logic, in isolation | Mocked DB/API calls (pytest fixtures) |
+| **Integration tests** | Agent → MCP server → DB/API calls working together | Local Postgres + real AWS DynamoDB/S3 (dev-prefixed resources, `project-plan.md` Q51) |
+| **End-to-end UI tests** | A claim submitted through Streamlit's Customer Chat view all the way to a verdict, including the Reviewer Dashboard escalation/approval path | The full local `docker compose` stack |
+| **Security / bypass tests** | Explicit proof that Image, Fraud, and Decision agents' MCP clients cannot reach `issue_refund` under any input, and that a human reviewer's approval still routes through the Orchestrator's single write path — 4 enumerated scenarios (Q16), detailed below | MCP server tool-schema inspection + attempted direct calls from non-Orchestrator clients |
+| **PII isolation tests** | Explicit proof that no raw customer-identifiable field ever reaches an agent's LLM context, in any of the four agents | Inspect every MCP tool's actual return payload + every constructed agent prompt, both in unit and integration runs |
+
+### PII isolation tests
+
+Per `project-plan.md` Q27, this is a hard rule, not a best-effort one — it gets its own dedicated test layer rather than being folded into "security."
+
+- **Payload scanning:** for every MCP tool response used to build agent LLM context, assert the payload contains no raw name, email, phone, physical/shipping address, or payment-method field — only `customer_ref`/`order_ref` tokens and de-identified/derived values (e.g. `account_age_days`, `address_match: bool`).
+- **Prompt scanning:** for every constructed agent prompt (Orchestrator, Image, Fraud, Decision), assert the same — a regression here would mean a prompt-building change re-introduced a raw field even if the underlying tool stayed clean.
+- **Photo redaction check:** assert `redact_photo` executes and its output (not the original upload) is what's passed to `analyze_image`, for both the GPT-4.1 mini and Llama 3.2 Vision paths.
+- **Exemption check:** assert the Reviewer Dashboard's backend calls are the *only* code path allowed to resolve a `customer_ref`/`order_ref` back to real customer data — anything else resolving it is a failing test, not a warning.
+- **Langfuse trace check (Q30):** assert every Langfuse trace's `user_id`/`session_id` metadata is a `customer_ref`/`claim_ref`, never a raw customer ID/email; assert no trace attaches an unredacted (pre-`redact_photo`) image. The rest of a trace's content is already covered by the payload/prompt scans above, since Langfuse only ever observes what's already downstream of that boundary.
+
+### Security / bypass tests
+
+Four enumerated scenarios (Q16), all proving the same underlying property — no agent besides the Orchestrator can ever reach `issue_refund`, under any input:
+
+- **Malformed/injected tool-call arguments:** an agent's tool call carries extra or malformed fields (e.g. a stray `payment_details` field smuggled onto `issue_refund`) that the schema doesn't define — assert the MCP server rejects it rather than silently accepting it.
+- **Cross-server access attempt:** the Image, Fraud, or Decision agent's MCP client tries to connect directly to the Orchestrator's server and call `issue_refund` — assert it's rejected at the connection/credential level, not merely "not offered" by that agent's own tool list.
+- **Prompt-injection via claim text:** a crafted claim description or photo caption tries to manipulate an agent into emitting text that resembles a tool call or overrides its instructions — assert it never results in an unauthorized action.
+- **Replay/idempotency abuse:** an old approved verdict or refund payload is resubmitted deliberately (not just retried accidentally) to try to trigger a second refund — assert the Q32 idempotency key holds under a deliberate replay, not only an accidental duplicate call.
+
+### Eval harness design
+
+- **Golden set:** 25–50 hand-crafted claims, spanning all 5 claim categories × the 3 fraud-risk bands × the 3 image-consistency levels, each with a known expected verdict (auto-approve / auto-deny / escalate) derived directly from the decision matrix in `project-plan.md`. Run on every CI push; any mismatch fails the build.
+- **Property tests:** randomized/generated claims that don't assert an exact verdict, but check invariants that must hold regardless of the specific inputs — e.g. refund amount > $200 always escalates; a "no photo provided" claim on a photo-required category always re-prompts rather than producing a verdict; `issue_refund` is only ever called after an "approve" (from the Decision Agent or a human override); a `search_refund_policy` call with no confidently relevant chunk always escalates rather than the Decision Agent reasoning from a weak match (`project-plan.md` Q56).
+- **Determinism:** all agent LLM calls in both the golden set and property tests run at temperature = 0, so results are reproducible in CI rather than flaky.
+
+### Agent evaluation metrics
+
+The golden-set and property-test runs (above) check the *final verdict*. These four techniques score what each agent did *on the way* to that verdict — routing, reasoning quality, and ordering — so a scenario can pass on the label but still fail on how the agent got there.
+
+| Metric | What it checks | Applies to |
+|---|---|---|
+| **Tool routing accuracy** | The agent called the tools it should have, and only those | All four agents |
+| **Semantic similarity** | Free-text reasoning matches a reference answer in meaning, not wording | Image Parsing, Decision |
+| **Named entity recognition** | Entities in the output are correct — and no identifiable entity leaked into free text | All four agents |
+| **Tool call sequence** | Tools fired in the required order, not just the required set | Orchestrator, Image Parsing, Fraud Scoring |
+| **Cost per claim** | Token usage and $ cost, per agent/model, for a claim moving through the whole pipeline | All four agents |
+| **Guardrail catch rate** | Whether the Q28 guardrails and the non-bypassable `issue_refund` gate actually hold against adversarial inputs, not just typical ones | Fraud, Decision, Orchestrator |
+| **RAGAS (context precision/recall, faithfulness, answer relevancy)** | Whether `search_refund_policy` retrieved the right chunks, and whether the verdict rationale is actually grounded in them | Decision |
+
+- **Tool routing accuracy:** for each golden-set scenario, compare the actual set of tools the agent called against the expected set for that agent (e.g. Fraud Scoring should touch `get_order`, `get_account_info`, `get_claim_frequency`, `get_tracking_status`, and `score_fraud_risk`; the Decision Agent should touch only `search_refund_policy`). Score as precision/recall over the tool-call set; a call to a tool outside the agent's own MCP server, or a required tool never called, is a routing failure.
+- **Semantic similarity:** for the Image Parsing Agent's consistency reasoning and the Decision Agent's verdict rationale, an exact-text match against a reference answer is too brittle — paraphrasing shouldn't fail a test. Instead, embed both the agent's answer and a reference answer and require a minimum cosine similarity. This is a softer check layered on top of the golden set's hard label match (Eval harness design, above), not a replacement for it.
+- **Named entity recognition — two uses:**
+  1. *Entity-level correctness:* run NER over an agent's output to extract claim-relevant entities (order reference, product name, claim category, monetary amount) and check they match the entities expected for that scenario — catches a case where the final label happens to be right but the reasoning points at the wrong order or product.
+  2. *PII-leak detection:* run NER over every piece of free text an agent produces — reasoning, tool-call arguments, verdict rationale — to catch a person name, street address, or other identifiable entity that slipped into unstructured text. This complements the "PII isolation tests" above: those scan structured tool payloads and prompt fields, NER catches what only shows up in prose. Any `PERSON`/`GPE`/`LOC`-class entity found in agent-LLM-bound text is a failing test under Q27's "no PII, under any circumstances" rule, not a warning.
+- **Tool call sequence:** validate order, not just membership — `redact_photo` must run before `analyze_image` and never after; `search_refund_policy` must be called before the Decision Agent emits a verdict; `issue_refund` must only appear in the Orchestrator's call trace after an "approve" (from the Decision Agent or a human override) is already present in its context, never before. Checked against the actual tool-call trace captured for the scenario (the same trace Langfuse records in `build-guide.html` Step 10), compared to an expected sequence per agent rather than an unordered set.
+- **Cost tracking (gate policy resolved by Q19):** every golden-set run pulls token usage and $ cost per claim from Langfuse (already tracking this per `project-plan.md`'s Tech stack), broken out per agent/model — GPT-4.1 mini's per-call $ cost, TrackingMore's per-call cost, and token counts for the three local Ollama models (no $ cost, but token count is the direct driver of the CPU-only latency risk already flagged separately). **Purely informational — no automated gate or ceiling**, consistent with Q23 (`project-plan.md`)'s "don't optimize for cost" stance; the point is visibility into a regression, not enforcing a budget that was never set.
+- **Safety/guardrails (set size resolved by Q20):** the regular golden set uses typical claims; a separate adversarial set is run alongside it — **several distinct variants per protected mechanism**, not just one token case each — where every scenario is deliberately engineered to try to trip a specific guardrail or gate rather than to land a correct verdict: e.g. multiple different claims crafted to push the Decision Agent toward "approve" on a refund over $200 (each must still be forced to "escalate" by the guardrail); several Fraud Task scenarios nudged toward citing a `key_signals` entry outside the real feature vocabulary (each must be caught by `fraud_guardrail`); several claim descriptions attempting to get the Orchestrator to call `issue_refund` without a prior "approve" already in context. Unlike the other metrics in this table, this one isn't scored on a sliding scale — since these guardrails and the `issue_refund` gate are meant to be non-bypassable by design (Q11, Q27, Q28), any adversarial scenario that gets through is a build-blocking failure, not a metric to trend.
+
+### RAG evaluation
+
+Since `project-plan.md` Q50 moved the Decision Agent's refund-policy lookup from a full-document fetch to retrieval against a Chroma vector store, retrieval itself is a new failure surface that the golden set's verdict check alone won't catch — a verdict can be correct by luck even when retrieval pulled the wrong policy chunks, or wrong despite pulling the right ones. **RAGAS** scores this directly, per golden-set scenario:
+
+- **Context precision:** of the chunks `search_refund_policy` actually returned, how many are relevant to the claim's category/circumstances — penalizes retrieving noise alongside (or instead of) the right clause.
+- **Context recall:** of the policy content actually relevant to the claim, how much did retrieval surface — penalizes missing the one clause (e.g. the >$200 guardrail, or a category-specific rule) that should have driven the verdict.
+- **Faithfulness:** does the Decision Agent's verdict rationale stick to what the retrieved chunks say, rather than asserting a policy rule that was never actually retrieved — catches the model's own reasoning drifting from its cited source.
+- **Answer relevancy:** does the rationale actually address the claim's specifics, rather than a generic restatement of policy text.
+
+Golden-set scenarios already have a known expected verdict (Eval harness design, above); a subset also needs a reference answer — the specific policy clause(s) that verdict should cite — for RAGAS's context precision/recall to have something to score against. Run at the same temperature = 0 setting as the rest of the golden set (Q6) for reproducibility. Threshold numbers for each RAGAS metric are not yet set — calibrated the same way as the semantic-similarity/NER thresholds (Q18): run the golden set once, then set thresholds from the real score distribution rather than guessing in advance.
+
+### Fraud model evaluation
+
+- Metrics tracked per candidate (per `project-plan.md` Q8): precision, recall, F1, and ROC-AUC, weighted for the dataset's ~10–20% fraud-class imbalance.
+- All 5 candidates (Logistic Regression, Random Forest, XGBoost, LightGBM, CatBoost) are trained and compared on the same split; each run is logged to **MLflow** (`project-plan.md` Q29) rather than compared by eye, and the best performer is selected by sorting the tracked metrics via `mlflow.search_runs()` — no pre-committed numeric floor (see "Open items").
+- The winning run is promoted through the **MLflow Model Registry** to `Production`. That registry entry — not a loose notebook cell — is the regression baseline: future retraining runs are logged under the same experiment and compared against the current `Production` version's metrics before being promoted over it.
+- Because every candidate's run (params, metrics, and the fitted model itself) is preserved in MLflow regardless of which one wins, "best of N" and "a fixed floor" are no longer mutually exclusive choices — a floor can be added later as a promotion gate (only promote a run that beats both the floor and the current `Production` metrics) without re-running any training.
+
+### CI gate policy
+
+- **Per-PR gate:** the GitHub Actions workflow (`project-plan.md` Q26) runs unit, integration, security/bypass, and PII-isolation tests on every push/PR — none of these need a real LLM call, so they're fast and reliably runnable on a hosted GitHub runner. CodeBuild only builds/deploys once this gate passes.
+- **Scheduled/pre-deploy gate (Q12):** the golden-set/property eval harness calls real local Ollama models across all four agents and doesn't fit a hosted runner's RAM/GPU budget — it runs nightly on a schedule, and again as a required check immediately before any deploy. A deploy is blocked if the latest scheduled run isn't green, even if the per-PR gate passed. **Flagged, not re-decided, by `project-plan.md` Q52:** Orchestrator and ML Fraud Scoring have since moved off Ollama to hosted GPT-4.1 mini, leaving only the Decision Agent (and Image Parsing's optional local Llama 3.2 Vision) needing a local model — a much lighter footprint than "three local 8B models" was when Q12 decided this split. Whether that's now light enough to fold the golden-set/property harness back into the per-PR gate is worth revisiting deliberately, not assumed either way here.
+- **All layers still block something** — the split is about *when* a layer runs, not whether it can be skipped. Nothing merges to main or deploys without every layer having passed at least once against the current code.
+
+## Open items
+
+Most of the items previously listed here were closed out by Q14–Q21. What's left:
+
+- **Fraud model numeric floor:** the *policy* is now settled (Q14 — decide after real training results, not now); the actual threshold number itself still doesn't exist yet, since training hasn't run. Revisit once Build Guide Step 5 produces real metrics.
+- **Performance/latency target:** the *approach* is now settled (Q21/`project-plan.md` Q49 — benchmark real hardware first); no target number exists yet because that benchmark hasn't run.
+- **Agent-call timeout value:** tied to the same benchmark as the latency target (`project-plan.md` Q49) — `AGENT_CALL_TIMEOUT_S = 180` in the build guide remains a placeholder until it does.
+- **Specific hosted embeddings/NER service:** Q17 chose "hosted API" over local tooling; `project-plan.md` Q50 has since picked OpenAI `text-embedding-3-small` for the (unrelated) RAG-retrieval use case, which is a reasonable candidate to reuse here too rather than adding a second embeddings dependency — but that reuse, and the NER service specifically, still need the same PII review against Q27 that GPT-4.1 mini went through before being confirmed for this use case.
+- **Similarity/entity-match threshold numbers:** Q18 settled the *method* (calibrate against real golden-set output first); the actual numbers don't exist until that calibration run happens.
+- **RAGAS threshold numbers:** Q22 settled that RAG evaluation happens; the actual context-precision/recall/faithfulness/answer-relevancy cutoffs don't exist yet, pending the same calibration-against-real-output approach as Q18.
+- **Whether the CI gate split (Q12) still needs to be a split:** `project-plan.md` Q52 moved 2 of 3 local-model agents to hosted GPT-4.1 mini, leaving only Decision Agent needing Ollama in the golden-set/property harness — not re-decided here, but worth a deliberate revisit given the original "three local 8B models don't fit a hosted runner" reasoning no longer fully applies.
