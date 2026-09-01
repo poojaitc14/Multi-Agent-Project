@@ -83,7 +83,17 @@ def _send_message(text: str) -> None:
     response = requests.post(
         f"{BACKEND_URL}/messages",
         json={"customer_identifier": st.session_state["customer_identifier"], "message": text},
-        timeout=180,  # the real CrewAI Flow behind this can take a while -- multiple real LLM calls
+        # project-plan.md Q90/Q91: 180s was confirmed too short for real
+        # traffic -- a claim that already has its photo chains Image
+        # Parsing (real vision call) -> Fraud Scoring (real DynamoDB/
+        # Postgres + SHAP-explained ML scoring) -> Decision (real
+        # OpenSearch retrieval + LLM call) in one request, and any
+        # guardrail retry at any of those stages adds a full extra round
+        # trip. Real backend logs showed claims genuinely completing past
+        # 180s, not hanging -- 480s gives real headroom without masking
+        # an actual hang (the Flow itself has no server-side timeout, so
+        # a truly stuck request would still eventually surface here).
+        timeout=480,
     )
     if response.status_code == 429:
         reply = "You've hit the claim-submission rate limit for now — please try again later."

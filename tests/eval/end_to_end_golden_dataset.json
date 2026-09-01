@@ -1,0 +1,262 @@
+[
+  {
+    "scenario_id": "change_of_mind_frock",
+    "customer_identifier": "e2e-golden-change_of_mind_frock-27903b@example.com",
+    "order_ref": "1",
+    "claim_category": "Change of Mind",
+    "claim_description": "I don't want this Blue Frock anymore, it's still unopened.",
+    "days_to_return": 2,
+    "photo_attached": false,
+    "turns": [
+      {
+        "sent": "Order 1, Change of Mind: I don't want this Blue Frock anymore, it's still unopened. It was 2 day(s) ago.",
+        "response": {
+          "needs_more_info": false,
+          "follow_up_question": null,
+          "request_type": "new_claim",
+          "claim_result": {
+            "claim_ref": "clm_24e00c059d",
+            "order_ref": "1",
+            "photo_required": false,
+            "image_verdict": "consistent",
+            "image_analysis_error": null,
+            "fraud_risk_band": "high",
+            "decision": "escalate",
+            "refund_form": "store_credit",
+            "policy_clause": "No defect \u2014 the customer simply doesn't want the item. No photo required. Store credit only, not a refund to the original payment method. Item must be unused/unopened. Governed by the 14-day sub-window, not the standard 30-day window.",
+            "policy_version": "v1.0",
+            "decision_error": null,
+            "transaction_id": null,
+            "outcome": "escalate"
+          }
+        }
+      }
+    ],
+    "final_claim_result": {
+      "claim_ref": "clm_24e00c059d",
+      "order_ref": "1",
+      "photo_required": false,
+      "image_verdict": "consistent",
+      "image_analysis_error": null,
+      "fraud_risk_band": "high",
+      "decision": "escalate",
+      "refund_form": "store_credit",
+      "policy_clause": "No defect \u2014 the customer simply doesn't want the item. No photo required. Store credit only, not a refund to the original payment method. Item must be unused/unopened. Governed by the 14-day sub-window, not the standard 30-day window.",
+      "policy_version": "v1.0",
+      "decision_error": null,
+      "transaction_id": null,
+      "outcome": "escalate"
+    }
+  },
+  {
+    "scenario_id": "change_of_mind_shirt",
+    "customer_identifier": "e2e-golden-change_of_mind_shirt-eec8b5@example.com",
+    "order_ref": "2",
+    "claim_category": "Change of Mind",
+    "claim_description": "Changed my mind about this shirt, unworn and still tagged.",
+    "days_to_return": 5,
+    "photo_attached": false,
+    "turns": [
+      {
+        "sent": "Order 2, Change of Mind: Changed my mind about this shirt, unworn and still tagged. It was 5 day(s) ago.",
+        "response": {
+          "needs_more_info": false,
+          "follow_up_question": null,
+          "request_type": "new_claim",
+          "claim_result": {
+            "claim_ref": "clm_613952536f",
+            "order_ref": "2",
+            "photo_required": false,
+            "image_verdict": "consistent",
+            "image_analysis_error": null,
+            "fraud_risk_band": "low",
+            "decision": "approve",
+            "refund_form": "store_credit",
+            "policy_clause": "No defect \u2014 the customer simply doesn't want the item. No photo required. Store credit only, not a refund to the original payment method. Item must be unused/unopened. Governed by the 14-day sub-window, not the standard 30-day window.",
+            "policy_version": "v1.0",
+            "decision_error": null,
+            "transaction_id": "rfd_6dbccb6760",
+            "outcome": "refunded"
+          }
+        }
+      }
+    ],
+    "final_claim_result": {
+      "claim_ref": "clm_613952536f",
+      "order_ref": "2",
+      "photo_required": false,
+      "image_verdict": "consistent",
+      "image_analysis_error": null,
+      "fraud_risk_band": "low",
+      "decision": "approve",
+      "refund_form": "store_credit",
+      "policy_clause": "No defect \u2014 the customer simply doesn't want the item. No photo required. Store credit only, not a refund to the original payment method. Item must be unused/unopened. Governed by the 14-day sub-window, not the standard 30-day window.",
+      "policy_version": "v1.0",
+      "decision_error": null,
+      "transaction_id": "rfd_6dbccb6760",
+      "outcome": "refunded"
+    }
+  },
+  {
+    "scenario_id": "damaged_sneakers",
+    "error": "ReadTimeout: HTTPConnectionPool(host='127.0.0.1', port=8002): Read timed out. (read timeout=180)"
+  },
+  {
+    "scenario_id": "damaged_frock",
+    "error": "ReadTimeout: HTTPConnectionPool(host='127.0.0.1', port=8002): Read timed out. (read timeout=180)"
+  },
+  {
+    "scenario_id": "damaged_tablet",
+    "error": "ReadTimeout: HTTPConnectionPool(host='127.0.0.1', port=8002): Read timed out. (read timeout=180)"
+  },
+  {
+    "scenario_id": "wrong_item_frock",
+    "error": "ReadTimeout: HTTPConnectionPool(host='127.0.0.1', port=8002): Read timed out. (read timeout=180)"
+  },
+  {
+    "scenario_id": "wrong_item_sneakers",
+    "error": "ReadTimeout: HTTPConnectionPool(host='127.0.0.1', port=8002): Read timed out. (read timeout=180)"
+  },
+  {
+    "scenario_id": "not_as_described_shirt",
+    "error": "ReadTimeout: HTTPConnectionPool(host='127.0.0.1', port=8002): Read timed out. (read timeout=180)"
+  },
+  {
+    "scenario_id": "not_as_described_sneakers",
+    "error": "ReadTimeout: HTTPConnectionPool(host='127.0.0.1', port=8002): Read timed out. (read timeout=180)"
+  },
+  {
+    "scenario_id": "defective_tablet",
+    "error": "ReadTimeout: HTTPConnectionPool(host='127.0.0.1', port=8002): Read timed out. (read timeout=180)"
+  },
+  {
+    "scenario_id": "defective_frock",
+    "error": "ReadTimeout: HTTPConnectionPool(host='127.0.0.1', port=8002): Read timed out. (read timeout=180)"
+  },
+  {
+    "scenario_id": "damaged_shirt",
+    "error": "ReadTimeout: HTTPConnectionPool(host='127.0.0.1', port=8002): Read timed out. (read timeout=180)"
+  },
+  {
+    "scenario_id": "damaged_watch",
+    "error": "ReadTimeout: HTTPConnectionPool(host='127.0.0.1', port=8002): Read timed out. (read timeout=180)"
+  },
+  {
+    "scenario_id": "wrong_item_tablet",
+    "error": "ReadTimeout: HTTPConnectionPool(host='127.0.0.1', port=8002): Read timed out. (read timeout=180)"
+  },
+  {
+    "scenario_id": "not_as_described_frock",
+    "error": "ReadTimeout: HTTPConnectionPool(host='127.0.0.1', port=8002): Read timed out. (read timeout=180)"
+  },
+  {
+    "scenario_id": "defective_sneakers",
+    "error": "ReadTimeout: HTTPConnectionPool(host='127.0.0.1', port=8002): Read timed out. (read timeout=180)"
+  },
+  {
+    "scenario_id": "change_of_mind_sneakers",
+    "customer_identifier": "e2e-golden-change_of_mind_sneakers-6d6dbf@example.com",
+    "order_ref": "4",
+    "claim_category": "Change of Mind",
+    "claim_description": "I just don't want these sneakers anymore, unused and unopened.",
+    "days_to_return": 1,
+    "photo_attached": false,
+    "turns": [
+      {
+        "sent": "Order 4, Change of Mind: I just don't want these sneakers anymore, unused and unopened. It was 1 day(s) ago.",
+        "response": {
+          "needs_more_info": false,
+          "follow_up_question": null,
+          "request_type": "new_claim",
+          "claim_result": {
+            "claim_ref": "clm_f126a61157",
+            "order_ref": "4",
+            "photo_required": false,
+            "image_verdict": "consistent",
+            "image_analysis_error": null,
+            "fraud_risk_band": "medium",
+            "decision": "escalate",
+            "refund_form": "store_credit",
+            "policy_clause": "No defect \u2014 the customer simply doesn't want the item. No photo required. Store credit only, not a refund to the original payment method. Item must be unused/unopened. Governed by the 14-day sub-window, not the standard 30-day window.",
+            "policy_version": "v1.0",
+            "decision_error": null,
+            "transaction_id": null,
+            "outcome": "escalate"
+          }
+        }
+      }
+    ],
+    "final_claim_result": {
+      "claim_ref": "clm_f126a61157",
+      "order_ref": "4",
+      "photo_required": false,
+      "image_verdict": "consistent",
+      "image_analysis_error": null,
+      "fraud_risk_band": "medium",
+      "decision": "escalate",
+      "refund_form": "store_credit",
+      "policy_clause": "No defect \u2014 the customer simply doesn't want the item. No photo required. Store credit only, not a refund to the original payment method. Item must be unused/unopened. Governed by the 14-day sub-window, not the standard 30-day window.",
+      "policy_version": "v1.0",
+      "decision_error": null,
+      "transaction_id": null,
+      "outcome": "escalate"
+    }
+  },
+  {
+    "scenario_id": "damaged_frock_never_sends_photo",
+    "customer_identifier": "e2e-golden-damaged_frock_never_sends_photo-6537ee@example.com",
+    "order_ref": "1",
+    "claim_category": "Damaged in Transit",
+    "claim_description": "The box arrived crushed.",
+    "days_to_return": 2,
+    "photo_attached": false,
+    "turns": [
+      {
+        "sent": "Order 1, Damaged in Transit: The box arrived crushed. It was 2 day(s) ago.",
+        "response": {
+          "needs_more_info": false,
+          "follow_up_question": null,
+          "request_type": "new_claim",
+          "claim_result": {
+            "claim_ref": "clm_df7425bd0e",
+            "order_ref": "1",
+            "photo_required": true,
+            "image_verdict": "no_photo",
+            "image_analysis_error": null,
+            "fraud_risk_band": null,
+            "decision": null,
+            "refund_form": null,
+            "policy_clause": null,
+            "policy_version": null,
+            "decision_error": null,
+            "transaction_id": null,
+            "outcome": "re_prompt_for_photo"
+          }
+        }
+      }
+    ],
+    "final_claim_result": {
+      "claim_ref": "clm_df7425bd0e",
+      "order_ref": "1",
+      "photo_required": true,
+      "image_verdict": "no_photo",
+      "image_analysis_error": null,
+      "fraud_risk_band": null,
+      "decision": null,
+      "refund_form": null,
+      "policy_clause": null,
+      "policy_version": null,
+      "decision_error": null,
+      "transaction_id": null,
+      "outcome": "re_prompt_for_photo"
+    }
+  },
+  {
+    "scenario_id": "defective_shirt",
+    "error": "ReadTimeout: HTTPConnectionPool(host='127.0.0.1', port=8002): Read timed out. (read timeout=180)"
+  },
+  {
+    "scenario_id": "wrong_item_watch",
+    "error": "ReadTimeout: HTTPConnectionPool(host='127.0.0.1', port=8002): Read timed out. (read timeout=180)"
+  }
+]
