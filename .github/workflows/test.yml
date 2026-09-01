@@ -98,6 +98,18 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
+      # docker-compose.yml's postgres service mounts infra/init.sql into
+      # /docker-entrypoint-initdb.d/, which the official Postgres image
+      # auto-runs on first startup -- but GitHub Actions' `services:`
+      # containers start before actions/checkout even runs, so that same
+      # repo-relative volume mount isn't possible here (confirmed for
+      # real: without this step, every tool call hit a genuine
+      # psycopg.errors.UndefinedTable, not a connectivity problem). Run
+      # the same real schema script explicitly instead, once the service
+      # is already up and the repo is checked out.
+      - name: Initialize Postgres schema
+        run: psql "$DATABASE_URL" -f infra/init.sql
+
       # The real MCP server, backed by real Postgres/AWS/Azure -- every
       # test in tests/ and tests/eval/ requires it already running,
       # exactly like local dev (agents/mcp_tools.py's own docstring: "no
