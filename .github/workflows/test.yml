@@ -133,7 +133,7 @@ jobs:
           cat mcp-server.log
           exit 1
 
-      # project-plan.md Q94: a real, confirmed connection failure on the
+      # project-plan.md Q95: a real, confirmed connection failure on the
       # very first test that actually needs real HTTP to the MCP server --
       # this project's own investigation walked back an earlier OOM theory
       # once it found most "passed" tests before the failure never touch

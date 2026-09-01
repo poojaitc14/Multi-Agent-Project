@@ -41,6 +41,14 @@ def get_gpt41_mini_llm(customer_ref: Optional[str] = None, claim_ref: Optional[s
         api_base=os.environ["AZURE_OPENAI_ENDPOINT"],
         api_version=os.environ["AZURE_OPENAI_API_VERSION"],
         additional_params=additional_params,
+        # project-plan.md Q95: a real field on crewai's LLM (confirmed via
+        # LLM.model_fields, not assumed), left unset before -- a single
+        # hung Azure OpenAI call had no bound at all. 90s is generous for
+        # a real GPT-4.1 mini completion; this exists to turn "hangs
+        # forever, taking the whole single-worker MCP server down with
+        # it" into "fails after 90s, the guardrail's own retry logic
+        # handles it the way it already handles any other real failure."
+        timeout=90,
     )
 
 

@@ -38,6 +38,7 @@ import pandas as pd
 import psycopg
 import requests
 from boto3.dynamodb.conditions import Attr, Key
+from botocore.config import Config
 from botocore.exceptions import ClientError
 from dotenv import load_dotenv
 from fastmcp import FastMCP
@@ -92,6 +93,16 @@ print("redact_photo detectors ready.")
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 AWS_REGION = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+# project-plan.md Q95: every boto3 client below used to rely entirely on
+# botocore's own defaults (60s connect + 60s read, up to several retries
+# with backoff) -- unbounded enough that a single real AWS call stuck for
+# genuine network reasons could stall the single-worker MCP server for
+# minutes, looking from the outside exactly like "the server is dead" even
+# though the process itself stays alive and healthy (confirmed for real
+# via a CI heartbeat: RSS stable, alive=yes throughout an entire failed
+# run). Tighter, explicit bounds -- still generous for real DynamoDB/S3
+# calls, which normally complete in well under a second.
+_AWS_CLIENT_CONFIG = Config(connect_timeout=10, read_timeout=15, retries={"max_attempts": 2})
 CONVERSATION_STATE_TABLE = os.environ["CONVERSATION_STATE_TABLE"]
 CLAIM_PHOTOS_BUCKET = os.environ["CLAIM_PHOTOS_BUCKET"]
 TRANSCRIPTS_BUCKET = os.environ["TRANSCRIPTS_BUCKET"]
@@ -159,11 +170,11 @@ def _pg_connect():
 
 
 def _dynamodb():
-    return boto3.resource("dynamodb", region_name=AWS_REGION)
+    return boto3.resource("dynamodb", region_name=AWS_REGION, config=_AWS_CLIENT_CONFIG)
 
 
 def _s3():
-    return boto3.client("s3", region_name=AWS_REGION)
+    return boto3.client("s3", region_name=AWS_REGION, config=_AWS_CLIENT_CONFIG)
 
 
 def ensure_local_infra() -> None:
@@ -175,7 +186,7 @@ def ensure_local_infra() -> None:
     from the test suite before it runs). Requires real AWS credentials
     (env vars, ~/.aws/credentials, or an IAM role) to be configured —
     boto3's default credential chain is used, nothing is hardcoded here."""
-    ddb_client = boto3.client("dynamodb", region_name=AWS_REGION)
+    ddb_client = boto3.client("dynamodb", region_name=AWS_REGION, config=_AWS_CLIENT_CONFIG)
     existing_tables = ddb_client.list_tables()["TableNames"]
     if CONVERSATION_STATE_TABLE not in existing_tables:
         ddb_client.create_table(
@@ -598,6 +609,7 @@ def _azure_chat_client():
         api_key=os.environ["AZURE_OPENAI_API_KEY"],
         azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
         api_version=os.environ["AZURE_OPENAI_API_VERSION"],
+        timeout=60.0,  # project-plan.md Q95 -- was unbounded (SDK default: 10 minutes)
     )
 
 
