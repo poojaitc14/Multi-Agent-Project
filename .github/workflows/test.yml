@@ -1,29 +1,33 @@
 name: Test
 
-# testing-and-evaluation-plan.md's "CI gate policy" -- revised by
-# project-plan.md Q85 (user decision): the golden-set/property/guardrail
-# eval harness (tests/eval/) originally ran on a separate nightly/pre-
-# deploy schedule (Q12) specifically because it needed local Ollama
-# models, which don't fit a hosted runner's RAM/GPU budget. That reason
-# no longer applies -- every agent moved off local models to hosted
-# Azure OpenAI (Q52/Q75) -- so this is now a single, unified gate: every
-# real test layer (unit/integration/security/PII-isolation, per Q7, plus
-# the eval harness) runs and blocks on every push/PR, by explicit choice,
-# not because a technical blocker was removed and the schedule was left
-# unrevisited.
+# testing-and-evaluation-plan.md's "CI gate policy". Q85 folded tests/eval/
+# (the golden-set/property/guardrail eval harness) into this same per-push
+# gate once every agent moved off local Ollama models (Q52/Q75) -- but a
+# real, live-debugged run (project-plan.md Q91) proved that decision had a
+# genuine cost neither Q85 nor Q12 anticipated: the two 25-scenario golden
+# sets alone run dozens of real LLM/vision calls each, and the hosted
+# runner's MCP server was very likely OOM-killed partway through (silent
+# death in the server log, no traceback -- 101 real tests had already
+# passed by then). Q93 (user decision) reverses Q85's "fold everything in"
+# back toward Q12's original split: tests/eval/ no longer runs on push,
+# closer to a nightly/pre-deploy cadence -- run it manually/locally
+# (`uv run pytest tests/eval/ -v`) until an actual scheduled trigger is
+# set up. tests/ (unit/integration/security/PII-isolation, per Q7) still
+# runs and blocks on every push/PR -- it never needed the heavy eval
+# harness's real-model loops to do its job.
 #
 # Real, not mocked, matching this project's tests themselves: a real
 # Postgres service container, real AWS DynamoDB/S3 (dev-prefixed
 # resources per project-plan.md Q51 -- LocalStack was dropped project-
 # wide, CI is no exception), and real Azure OpenAI/Langfuse calls via
-# repository secrets. This means CI costs real API spend on every push --
-# an accepted, explicit tradeoff of the "move eval harness to every push"
-# decision above, not an oversight.
+# repository secrets. This still means CI costs real API spend on every
+# push (tests/ alone makes genuine LLM calls too, just far fewer) -- an
+# accepted, explicit tradeoff, not an oversight.
 #
-# RAGAS/cost reports (tests/eval/ragas_report.py, cost_report.py) are
-# deliberately NOT part of this gate -- testing-and-evaluation-plan.md's
-# Q19 is explicit that cost tracking is purely informational, no
-# automated gate/ceiling, and RAGAS's thresholds are still uncalibrated
+# RAGAS/cost reports (tests/eval/ragas_report.py, cost_report.py) were
+# already, separately, never part of this gate -- testing-and-evaluation-
+# plan.md's Q19 is explicit that cost tracking is purely informational,
+# no automated gate/ceiling, and RAGAS's thresholds are still uncalibrated
 # (Q18/Q22) with no pass/fail criteria decided yet to gate on.
 
 on:
@@ -128,8 +132,10 @@ jobs:
           cat mcp-server.log
           exit 1
 
-      - name: Run tests (unit/integration/security/PII-isolation + eval harness)
-        run: uv run pytest tests/ -v
+      - name: Run tests (unit/integration/security/PII-isolation)
+        # tests/eval/ deliberately excluded (project-plan.md Q93) -- see
+        # this file's header comment for why.
+        run: uv run pytest tests/ --ignore=tests/eval -v
 
       - name: Show MCP server log on failure
         if: failure()
