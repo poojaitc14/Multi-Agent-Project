@@ -121,6 +121,7 @@ jobs:
       - name: Start MCP server
         run: |
           nohup uv run python mcp-servers/orchestrator_server.py > mcp-server.log 2>&1 &
+          echo $! > mcp-server.pid
           for i in $(seq 1 60); do
             if curl -sS -o /dev/null -w "%{http_code}" http://127.0.0.1:8001/mcp 2>/dev/null | grep -q "406"; then
               echo "MCP server up"
@@ -132,10 +133,37 @@ jobs:
           cat mcp-server.log
           exit 1
 
+      # project-plan.md Q94: a real, confirmed connection failure on the
+      # very first test that actually needs real HTTP to the MCP server --
+      # this project's own investigation walked back an earlier OOM theory
+      # once it found most "passed" tests before the failure never touch
+      # the server over real HTTP at all. This heartbeat (PID liveness +
+      # RSS memory, every 5s, appended throughout the whole test run, not
+      # just on failure) is real instrumentation to find out what actually
+      # happens to the process, not another guess.
+      - name: Start MCP server heartbeat monitor
+        run: |
+          MCP_PID=$(cat mcp-server.pid)
+          nohup bash -c '
+            while true; do
+              if kill -0 '"$MCP_PID"' 2>/dev/null; then
+                rss=$(ps -o rss= -p '"$MCP_PID"' 2>/dev/null | tr -d " ")
+                echo "$(date -u +%H:%M:%S) alive=yes rss_kb=${rss:-unknown}"
+              else
+                echo "$(date -u +%H:%M:%S) alive=no -- process is gone"
+              fi
+              sleep 5
+            done
+          ' > mcp-server-heartbeat.log 2>&1 &
+
       - name: Run tests (unit/integration/security/PII-isolation)
         # tests/eval/ deliberately excluded (project-plan.md Q93) -- see
         # this file's header comment for why.
         run: uv run pytest tests/ --ignore=tests/eval -v
+
+      - name: Show MCP server heartbeat (always -- confirms liveness even on a pass)
+        if: always()
+        run: cat mcp-server-heartbeat.log
 
       - name: Show MCP server log on failure
         if: failure()
