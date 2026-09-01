@@ -5,6 +5,12 @@ __pycache__/
 .pytest_cache/
 ml/data/*.csv
 !ml/data/.gitkeep
+# synthetic_fraud_risk_dataset.csv has no reproducible generation script
+# (ml/model_training.ipynb only reads it) -- CI and any fresh clone need
+# the real file itself, not a regenerate-on-demand step that doesn't
+# exist. Committed as a real project asset, same treatment
+# docs/refund_policy.md already gets (.dockerignore's docs/* + negation).
+!ml/data/synthetic_fraud_risk_dataset.csv
 ml/*.joblib
 ml/.ipynb_checkpoints/
 ml/mlruns/
