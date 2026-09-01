@@ -309,7 +309,25 @@ def _process_message(customer_identifier: str, message: str) -> MessageResponse:
         claim_ref, customer_identifier, customer_ref, merged["order_ref"], merged["claim_category"],
         merged["claim_description"], int(merged["days_to_return"]),
     )
-    _put_conversation_state(customer_ref, {"claim_status": "resolved", "claim_ref": claim_result.claim_ref})
+    # re_prompt_for_photo means the claim is NOT done -- the Flow is still
+    # waiting on the customer, same as needs_more_info above, just
+    # discovered a step later (inside ClaimTriageFlow's photo-required
+    # check, not the Orchestrator's own intake-field check). Marking this
+    # "resolved" like a genuine final outcome was a real bug: it broke
+    # claim_ref continuity for the photo upload and the customer's next
+    # message (each minted a fresh, disconnected claim_ref instead of
+    # continuing this one) and wrongly charged the follow-up against the
+    # rate limit, even though it's the same back-and-forth Q39 already
+    # exempts for missing-field follow-ups.
+    if claim_result.outcome == "re_prompt_for_photo":
+        # Persist the already-known intake fields too (same shape as the
+        # missing-fields branch above) -- otherwise the next message loses
+        # order_ref/claim_category/etc. and gets re-prompted for them
+        # instead of proceeding straight to re-running the claim now that
+        # a photo exists.
+        _put_conversation_state(customer_ref, {**merged, "claim_status": "awaiting_details", "claim_ref": claim_result.claim_ref})
+    else:
+        _put_conversation_state(customer_ref, {"claim_status": "resolved", "claim_ref": claim_result.claim_ref})
     return MessageResponse(needs_more_info=False, request_type=intake.request_type, claim_result=claim_result)
 
 

@@ -1,0 +1,117 @@
+name: Test
+
+# testing-and-evaluation-plan.md's "CI gate policy" -- revised by
+# project-plan.md Q85 (user decision): the golden-set/property/guardrail
+# eval harness (tests/eval/) originally ran on a separate nightly/pre-
+# deploy schedule (Q12) specifically because it needed local Ollama
+# models, which don't fit a hosted runner's RAM/GPU budget. That reason
+# no longer applies -- every agent moved off local models to hosted
+# Azure OpenAI (Q52/Q75) -- so this is now a single, unified gate: every
+# real test layer (unit/integration/security/PII-isolation, per Q7, plus
+# the eval harness) runs and blocks on every push/PR, by explicit choice,
+# not because a technical blocker was removed and the schedule was left
+# unrevisited.
+#
+# Real, not mocked, matching this project's tests themselves: a real
+# Postgres service container, real AWS DynamoDB/S3 (dev-prefixed
+# resources per project-plan.md Q51 -- LocalStack was dropped project-
+# wide, CI is no exception), and real Azure OpenAI/Langfuse calls via
+# repository secrets. This means CI costs real API spend on every push --
+# an accepted, explicit tradeoff of the "move eval harness to every push"
+# decision above, not an oversight.
+#
+# RAGAS/cost reports (tests/eval/ragas_report.py, cost_report.py) are
+# deliberately NOT part of this gate -- testing-and-evaluation-plan.md's
+# Q19 is explicit that cost tracking is purely informational, no
+# automated gate/ceiling, and RAGAS's thresholds are still uncalibrated
+# (Q18/Q22) with no pass/fail criteria decided yet to gate on.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: fraud_triage
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/fraud_triage
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+      CONVERSATION_STATE_TABLE: conversation-state-ci
+      CLAIM_PHOTOS_BUCKET: claim-photos-ci
+      TRANSCRIPTS_BUCKET: chat-transcripts-ci
+      CLAIM_FREQUENCY_TABLE: claim-frequency-ci
+      MCP_SERVER_HOST: 127.0.0.1
+      MCP_SERVER_PORT: 8001
+      ORCHESTRATOR_MCP_TOKEN: ${{ secrets.ORCHESTRATOR_MCP_TOKEN }}
+      IMAGE_PARSING_MCP_TOKEN: ${{ secrets.IMAGE_PARSING_MCP_TOKEN }}
+      FRAUD_SCORING_MCP_TOKEN: ${{ secrets.FRAUD_SCORING_MCP_TOKEN }}
+      DECISION_MCP_TOKEN: ${{ secrets.DECISION_MCP_TOKEN }}
+      REVIEWER_PASSWORD: ${{ secrets.REVIEWER_PASSWORD }}
+      AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+      AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
+      AZURE_OPENAI_API_VERSION: ${{ secrets.AZURE_OPENAI_API_VERSION }}
+      AZURE_OPENAI_DEPLOYMENT_NAME: ${{ secrets.AZURE_OPENAI_DEPLOYMENT_NAME }}
+      AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME: ${{ secrets.AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME }}
+      AZURE_OPENAI_EMBEDDING_MODEL: ${{ secrets.AZURE_OPENAI_EMBEDDING_MODEL }}
+      LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+      LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+      LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
+      PYTHONUTF8: "1"
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      # The real MCP server, backed by real Postgres/AWS/Azure -- every
+      # test in tests/ and tests/eval/ requires it already running,
+      # exactly like local dev (agents/mcp_tools.py's own docstring: "no
+      # in-process fallback, by design").
+      - name: Start MCP server
+        run: |
+          nohup uv run python mcp-servers/orchestrator_server.py > mcp-server.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -sS -o /dev/null -w "%{http_code}" http://127.0.0.1:8001/mcp 2>/dev/null | grep -q "406"; then
+              echo "MCP server up"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "MCP server did not become ready in time"
+          cat mcp-server.log
+          exit 1
+
+      - name: Run tests (unit/integration/security/PII-isolation + eval harness)
+        run: uv run pytest tests/ -v
+
+      - name: Show MCP server log on failure
+        if: failure()
+        run: cat mcp-server.log

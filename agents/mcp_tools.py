@@ -29,7 +29,7 @@ ORCHESTRATOR_TOOLS = (
     "resolve_customer_ref", "get_order", "issue_refund", "get_conversation_state",
     "put_conversation_state", "store_photo", "get_photo", "store_transcript",
 )
-IMAGE_PARSING_TOOLS = ("get_photo", "get_product_reference", "redact_photo", "analyze_image")
+IMAGE_PARSING_TOOLS = ("analyze_claim_photo",)
 FRAUD_SCORING_TOOLS = (
     "get_order", "get_account_info", "get_claim_frequency",
     "increment_claim_frequency", "get_tracking_status", "score_fraud_risk",

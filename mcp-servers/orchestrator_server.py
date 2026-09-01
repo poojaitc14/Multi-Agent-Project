@@ -38,6 +38,7 @@ import pandas as pd
 import psycopg
 import requests
 from boto3.dynamodb.conditions import Attr, Key
+from botocore.exceptions import ClientError
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
@@ -645,6 +646,54 @@ def analyze_image(
         response_format={"type": "json_schema", "json_schema": _CONSISTENCY_JSON_SCHEMA},
     )
     return json.loads(response.choices[0].message.content)
+
+
+@mcp.tool
+def analyze_claim_photo(claim_ref: str, order_ref: str, claim_category: str, claim_description: str) -> dict:
+    """Collapses get_photo -> redact_photo -> get_product_reference ->
+    analyze_image into one server-side call (project-plan.md Q86/Q87) -- the
+    LLM never sees or retypes the raw photo bytes at all. Fixes a real,
+    confirmed bug: GPT-4.1 mini can't reliably reproduce a ~20K-character
+    base64 photo blob verbatim as a tool-call argument (verified by
+    comparing what it actually sent to redact_photo against the real photo
+    byte-for-byte -- the model copies correctly for a while, then silently
+    drifts into a plausible-looking but fabricated ending). Retries can't
+    fix that kind of long-string generation drift, since it's systematic,
+    not a one-off glitch -- the only real fix is keeping the blob out of
+    the LLM's own generated arguments entirely, the same principle this
+    project already applies to every other PII/binary payload.
+
+    get_photo/redact_photo/get_product_reference/analyze_image remain real,
+    independently callable/testable tools in their own right (each already
+    has direct test coverage) -- this doesn't replace or remove them, it's
+    a second, safer entry point the Image Parsing Agent uses instead of
+    orchestrating the same 4 steps itself.
+
+    Returns exactly the shape ConsistencyAssessment needs: {"verdict",
+    "product_match", "reasoning"}. verdict='no_photo' (product_match=False)
+    when no photo exists for this claim, decided deterministically here --
+    no LLM call happens in that case, same as the Task-level check the
+    Image Parsing Agent used to do itself before this tool existed."""
+    try:
+        photo_base64 = get_photo(claim_ref)
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") != "NoSuchKey":
+            raise
+        return {
+            "verdict": "no_photo",
+            "product_match": False,
+            "reasoning": f"No photo was found for claim {claim_ref}.",
+        }
+
+    redacted_base64 = redact_photo(photo_base64)
+    reference = get_product_reference(order_ref)
+    return analyze_image(
+        photo_base64=redacted_base64,
+        claim_category=claim_category,
+        claim_description=claim_description,
+        reference_title=reference["title"],
+        reference_description=reference.get("description") or "",
+    )
 
 
 @mcp.tool

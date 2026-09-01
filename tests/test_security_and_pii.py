@@ -39,11 +39,8 @@ import uuid
 from pathlib import Path
 
 import pytest
-from fastmcp import Client
-from fastmcp.client.transports import StreamableHttpTransport
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "mcp-servers"))
-import orchestrator_server as srv  # noqa: E402
+from conftest import http_client as _http_client  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from agents.decision_agent import build_verdict_task  # noqa: E402
@@ -51,9 +48,6 @@ from agents.fraud_scoring_agent import build_fraud_scoring_task  # noqa: E402
 from agents.image_parsing_agent import build_consistency_task  # noqa: E402
 from agents.mcp_tools import DECISION_TOOLS, FRAUD_SCORING_TOOLS, IMAGE_PARSING_TOOLS, ORCHESTRATOR_TOOLS  # noqa: E402
 from agents.orchestrator_agent import build_classification_task, build_intake_task  # noqa: E402
-
-TEST_HTTP_PORT = 8091  # matches tests/test_orchestrator_server.py's already-running fixture server
-TEST_HTTP_URL = f"http://127.0.0.1:{TEST_HTTP_PORT}/mcp"
 
 # A real customer identifier shape, deliberately never passed to any
 # build_*_task function below -- the point of the prompt-scanning tests is
@@ -63,11 +57,6 @@ _FORBIDDEN_PII_PATTERNS = [
     re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"),  # email
     re.compile(r"\b(?:\+?\d[\s-]?){10,}\b"),  # phone-number-shaped digit run
 ]
-
-
-def _http_client(token: str | None) -> Client:
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
-    return Client(StreamableHttpTransport(url=TEST_HTTP_URL, headers=headers))
 
 
 def _assert_no_pii_patterns(text: str, label: str) -> None:
@@ -86,7 +75,7 @@ async def test_issue_refund_rejects_unschematized_extra_field():
     (e.g. a stray payment_details smuggled onto issue_refund) -- MCP's
     JSON-RPC layer must reject this before it ever reaches the real
     function body, not silently ignore the extra field and proceed."""
-    async with _http_client(srv.ORCHESTRATOR_MCP_TOKEN) as c:
+    async with _http_client(os.environ["ORCHESTRATOR_MCP_TOKEN"]) as c:
         with pytest.raises(Exception):
             await c.call_tool(
                 "issue_refund",

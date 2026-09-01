@@ -21,7 +21,15 @@ ml/.ipynb_checkpoints/
 ml/*.joblib
 
 tests/
-docs/
+# docs/refund_policy.md is a real runtime dependency, not just
+# documentation -- ml/rag/index_chunks.py and embed_and_index.py read it
+# to (re-)index the OpenSearch Serverless collection search_refund_policy
+# queries. Confirmed the hard way: a real re-indexing run inside the
+# mcp-server container failed with a genuine FileNotFoundError until this
+# exclusion was narrowed. Every other doc stays excluded -- none of them
+# are read at runtime.
+docs/*
+!docs/refund_policy.md
 README.md
 project-plan.md
 project-summary.txt

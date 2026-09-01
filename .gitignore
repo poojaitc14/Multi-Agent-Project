@@ -8,3 +8,9 @@ ml/data/*.csv
 ml/*.joblib
 ml/.ipynb_checkpoints/
 ml/mlruns/
+
+# Raw third-party dataset downloads (e.g. the Roboflow Damaged Package
+# Detection zip, project-plan.md Q89) -- only the small, reviewed sample
+# copied into tests/fixtures/images/ is meant to be tracked, not the
+# full multi-MB source archive.
+images dataset/

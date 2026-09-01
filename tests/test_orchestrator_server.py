@@ -15,8 +15,6 @@ table/bucket names in .env.
 import base64
 import os
 import sys
-import threading
-import time
 import uuid
 from pathlib import Path
 
@@ -24,49 +22,17 @@ import cv2
 import numpy as np
 import pytest
 from fastmcp import Client
-from fastmcp.client.transports import StreamableHttpTransport
+
+from conftest import http_client as _http_client  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "mcp-servers"))
 import orchestrator_server as srv  # noqa: E402
-
-TEST_HTTP_PORT = 8091  # distinct from MCP_SERVER_PORT so a real dev server can run alongside tests
-TEST_HTTP_URL = f"http://127.0.0.1:{TEST_HTTP_PORT}/mcp"
-
-
-@pytest.fixture(scope="session", autouse=True)
-def _local_infra():
-    srv.ensure_local_infra()
-
-
-@pytest.fixture(scope="session", autouse=True)
-def _http_server():
-    """Real HTTP transport (Q55's bearer-token gate is an HTTP-headers
-    concern -- in-memory transport carries no headers at all, so it can't
-    exercise this). Runs the same `srv.mcp` instance the in-memory client
-    fixture below also uses; FastMCP allows both simultaneously."""
-    thread = threading.Thread(
-        target=srv.mcp.run,
-        kwargs={"transport": "http", "host": "127.0.0.1", "port": TEST_HTTP_PORT},
-        daemon=True,
-    )
-    thread.start()
-    time.sleep(1.5)  # let it finish binding before the first test tries to connect
-    yield
 
 
 @pytest.fixture
 async def client():
     async with Client(transport=srv.mcp) as c:
         yield c
-
-
-def _http_client(token: str | None) -> Client:
-    # fastmcp.client.auth.BearerAuth does NOT attach a plain Authorization
-    # header the way it sounds like it should (verified empirically -- the
-    # server-side middleware saw no authorization header at all with it).
-    # StreamableHttpTransport's headers= param does work.
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
-    return Client(StreamableHttpTransport(url=TEST_HTTP_URL, headers=headers))
 
 
 async def test_resolve_customer_ref_creates_and_reuses(client: Client):
@@ -376,6 +342,64 @@ async def test_analyze_image_returns_grounded_verdict(client: Client):
     assert isinstance(data["product_match"], bool)
     assert isinstance(data["reasoning"], str) and len(data["reasoning"]) > 0
     assert data["product_match"] is False, "a plain red square should not be judged to match a laptop"
+
+
+async def test_analyze_claim_photo_no_photo_is_deterministic(client: Client):
+    """project-plan.md Q86/Q87: analyze_claim_photo collapses get_photo ->
+    redact_photo -> get_product_reference -> analyze_image into one
+    server-side tool. No photo stored for this claim_ref -> a real S3
+    NoSuchKey, handled deterministically (no LLM call, no vision API cost)."""
+    claim_ref = f"clm_{uuid.uuid4().hex[:8]}"
+    result = await client.call_tool(
+        "analyze_claim_photo",
+        {
+            "claim_ref": claim_ref, "order_ref": "1", "claim_category": "Damaged in Transit",
+            "claim_description": "The box arrived crushed.",
+        },
+    )
+    data = result.data
+    assert data == {
+        "verdict": "no_photo", "product_match": False,
+        "reasoning": f"No photo was found for claim {claim_ref}.",
+    }
+
+
+async def test_analyze_claim_photo_real_photo_returns_grounded_verdict(client: Client):
+    """The real, end-to-end fix for the base64-truncation bug: a real photo
+    stored via store_photo, then analyze_claim_photo does the entire fetch/
+    redact/analyze chain itself -- the caller here (this test, standing in
+    for the Image Parsing Agent) never handles the raw photo bytes at all,
+    only claim_ref. Same grounding assertion as
+    test_analyze_image_returns_grounded_verdict: a claim photo that
+    obviously doesn't match the referenced product should score
+    product_match=False, confirming analyze_claim_photo's internal
+    analyze_image call is genuinely grounded in the real image content."""
+    import io
+
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", (300, 300), color=(240, 240, 240))
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([50, 50, 250, 250], fill=(200, 30, 30))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG")
+    photo_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+
+    claim_ref = f"clm_{uuid.uuid4().hex[:8]}"
+    await client.call_tool("store_photo", {"claim_ref": claim_ref, "photo_base64": photo_b64})
+
+    result = await client.call_tool(
+        "analyze_claim_photo",
+        {
+            "claim_ref": claim_ref, "order_ref": "1", "claim_category": "Wrong Item Received",
+            "claim_description": "I ordered a laptop but received this instead.",
+        },
+    )
+    data = result.data
+    assert data["verdict"] in ("consistent", "partially_consistent", "inconsistent")
+    assert isinstance(data["product_match"], bool)
+    assert isinstance(data["reasoning"], str) and len(data["reasoning"]) > 0
+    assert data["product_match"] is False, "a plain red square should not be judged to match order 1's real product"
 
 
 @pytest.mark.parametrize(

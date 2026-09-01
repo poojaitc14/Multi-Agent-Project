@@ -143,14 +143,19 @@ class ClaimTriageFlow(Flow[ClaimState]):
 
     @listen("run_image_parsing")
     def do_image_parsing(self) -> str:
-        """May exhaust consistency_guardrail's retries and raise (proven
-        real, not hypothetical: a 6KB test photo hit this on 4/4 attempts
-        in one real run, base64 corruption in the agent's own tool-call
-        argument generation, see image_parsing_agent.py). Caught here --
-        same graceful-degradation shape as do_decision -- rather than
-        crashing the whole Flow; a repeatedly-corrupted photo analysis is
-        exactly the kind of ambiguous case a human should review, not
-        something to silently retry forever or let take the Flow down."""
+        """May still exhaust consistency_guardrail's retries and raise (a
+        real, genuine analyze_claim_photo failure -- Azure vision API down,
+        a corrupted stored photo, etc.) -- caught here, same graceful-
+        degradation shape as do_decision, rather than crashing the whole
+        Flow. This used to also catch a specific, confirmed base64-
+        truncation bug in the agent's own tool-call argument generation
+        (project-plan.md Q86): a 6KB test photo hit it on 4/4 attempts in
+        one real run, later confirmed at 100% reproducibility and root-
+        caused as long-string generation drift. That's fixed now (Q87) --
+        the photo bytes never enter the LLM's own generated arguments at
+        all anymore, see image_parsing_agent.py -- so this except clause is
+        back to handling genuine, unrelated failures, not routinely
+        catching that specific one."""
         try:
             with image_parsing_mcp_adapter() as tools:
                 agent = build_image_parsing_agent(tools, self.state.customer_ref, self.state.claim_ref)
