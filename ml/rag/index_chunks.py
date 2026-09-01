@@ -57,6 +57,7 @@ def ensure_index(client: OpenSearch):
                     "title": {"type": "text"},
                     "text": {"type": "text"},
                     "policy_version": {"type": "keyword"},
+                    "source_document": {"type": "keyword"},
                 }
             },
         },
@@ -68,16 +69,20 @@ def index_chunks(client: OpenSearch, chunks: list[dict]):
     # OpenSearch Serverless (vector-search collections) rejects a caller-supplied
     # document _id on index -- rely on the chunk_id *field* for identity instead.
     for chunk in chunks:
-        client.index(
-            index=INDEX_NAME,
-            body={
-                "chunk_id": chunk["chunk_id"],
-                "title": chunk["title"],
-                "text": chunk["text"],
-                "policy_version": chunk["policy_version"],
-                "embedding": chunk["embedding"],
-            },
-        )
+        body = {
+            "chunk_id": chunk["chunk_id"],
+            "title": chunk["title"],
+            "text": chunk["text"],
+            "policy_version": chunk["policy_version"],
+            "embedding": chunk["embedding"],
+        }
+        # project-plan.md Q96: chunk_document.py's admin-upload chunks carry
+        # a source_document field that chunk_policy.py's refund-policy
+        # chunks don't have -- included only when present so the base
+        # policy chunks' documents are unchanged.
+        if "source_document" in chunk:
+            body["source_document"] = chunk["source_document"]
+        client.index(index=INDEX_NAME, body=body)
     print(f"Indexed {len(chunks)} chunks into '{INDEX_NAME}'")
     # OpenSearch Serverless doesn't support a synchronous refresh=True request
     # (rejected above) -- it refreshes on its own interval instead. Measured

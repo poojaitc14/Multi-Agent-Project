@@ -24,10 +24,12 @@ configured (env vars, ~/.aws/credentials, or an IAM role).
 import base64
 import json
 import os
+import random
 import sys
+import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import boto3
@@ -123,6 +125,77 @@ _SYNTHETIC_PROFILE_COLS = [
 _SYNTHETIC_PROFILE_POOL = pd.read_csv(
     Path(__file__).resolve().parent.parent / "ml" / "data" / "synthetic_fraud_risk_dataset.csv"
 )[_SYNTHETIC_PROFILE_COLS]
+
+
+# project-plan.md Q98: get_order and get_product_reference each
+# independently GET https://dummyjson.com/carts/{order_ref} -- a literal
+# duplicate external call within one claim, repeated again on every
+# guardrail retry (Fraud Scoring's own guardrail was observed retrying a
+# real claim twice in a row). DummyJSON's demo cart/product data doesn't
+# change during a session, so a short in-process TTL cache, keyed on the
+# real request URL, removes the duplication without risking stale data
+# across sessions. Same threading.Lock()-guarded dict pattern
+# backend/main.py's own rate limiter already uses, for consistency.
+_DUMMYJSON_CACHE_TTL_SECONDS = 300
+_dummyjson_cache_lock = threading.Lock()
+_dummyjson_cache: dict[str, tuple[float, dict]] = {}
+
+
+def _dummyjson_get(url: str) -> dict:
+    now = time.monotonic()
+    with _dummyjson_cache_lock:
+        cached = _dummyjson_cache.get(url)
+        if cached is not None and now - cached[0] < _DUMMYJSON_CACHE_TTL_SECONDS:
+            return cached[1]
+
+    response = requests.get(url, timeout=10)
+    response.raise_for_status()
+    data = response.json()
+
+    with _dummyjson_cache_lock:
+        _dummyjson_cache[url] = (now, data)
+    return data
+
+
+def _fetch_cart(order_ref: str) -> dict:
+    return _dummyjson_get(f"https://dummyjson.com/carts/{order_ref}")
+
+
+def _fetch_product(product_id) -> dict:
+    return _dummyjson_get(f"https://dummyjson.com/products/{product_id}")
+
+
+# project-plan.md Q98: DummyJSON carts have no purchase-date field at all,
+# so there was previously no way for anything in this system to check a
+# customer's self-reported days_to_return against a real order timestamp.
+# Same bootstrap-and-persist pattern get_account_info already uses for
+# customer_profiles (Q59): the first call for a given order_ref samples a
+# value ONCE (a uniform-random offset of 1-60 days before "now") and
+# persists it in order_metadata; every later call for that same order_ref
+# returns the same stored date, so it stays stable across a session
+# instead of silently drifting every time get_order is called.
+#
+# Deliberately NOT wired into score_fraud_risk's actual model inputs --
+# agents/fraud_scoring_agent.py's own docstring already documents a real,
+# considered decision that days_to_return stays customer-provided (no
+# natural per-claim synthetic value to persist the way a per-order or
+# per-customer profile can be). This field is additive, real order
+# context returned by get_order, not a replacement for that input.
+def _get_or_seed_order_date(order_ref: str) -> str:
+    with _pg_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT order_date FROM order_metadata WHERE order_ref = %s", (order_ref,))
+            row = cur.fetchone()
+            if row:
+                return row[0].isoformat()
+
+            order_date = datetime.now(timezone.utc) - timedelta(days=random.randint(1, 60))
+            cur.execute(
+                "INSERT INTO order_metadata (order_ref, order_date) VALUES (%s, %s)",
+                (order_ref, order_date),
+            )
+        conn.commit()
+    return order_date.isoformat()
 
 
 def _sample_synthetic_profile() -> tuple:
@@ -259,6 +332,41 @@ def ensure_local_infra() -> None:
                 )
                 """
             )
+            # project-plan.md Q97 -- also created via infra/init.sql for a
+            # fresh container, mirrored here for the same reason
+            # customer_profiles/review_queue are: an already-initialized
+            # local Postgres volume that predates this table.
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS claims (
+                    claim_ref TEXT PRIMARY KEY,
+                    customer_ref TEXT NOT NULL REFERENCES customers(customer_ref),
+                    order_ref TEXT NOT NULL,
+                    claim_category TEXT NOT NULL,
+                    claim_description TEXT NOT NULL,
+                    refund_amount_usd NUMERIC(10, 2) NOT NULL DEFAULT 0,
+                    image_verdict TEXT,
+                    fraud_risk_band TEXT,
+                    decision TEXT,
+                    outcome TEXT NOT NULL,
+                    transaction_id TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+            # project-plan.md Q98: get_order/get_product_reference's
+            # bootstrap-and-persist synthetic order_date (see
+            # _get_or_seed_order_date's docstring above).
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS order_metadata (
+                    order_ref TEXT PRIMARY KEY,
+                    order_date TIMESTAMPTZ NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
         conn.commit()
 
     s3_client = _s3()
@@ -306,15 +414,20 @@ def get_order(order_ref: str) -> dict:
     No shipping name/address/payment fields — those are resolved
     internally by issue_refund when the money actually moves.
     Backed by DummyJSON's public cart API, the closest available
-    resource to "order" in the free APIs this project committed to."""
-    response = requests.get(f"https://dummyjson.com/carts/{order_ref}", timeout=10)
-    response.raise_for_status()
-    cart = response.json()
+    resource to "order" in the free APIs this project committed to.
+
+    order_date (project-plan.md Q98): a real, stable value now, not always
+    None -- DummyJSON itself has no purchase-date field, so
+    _get_or_seed_order_date bootstrap-samples and persists one the first
+    time a given order_ref is seen, the same pattern get_account_info uses
+    for customer_profiles. See that function's docstring for why this
+    isn't wired into score_fraud_risk's actual model inputs."""
+    cart = _fetch_cart(order_ref)
     first_product = cart["products"][0] if cart.get("products") else {}
     return {
         "product": first_product.get("title", "unknown"),
         "amount": cart.get("total", 0),
-        "order_date": None,  # DummyJSON carts have no order/purchase date field
+        "order_date": _get_or_seed_order_date(order_ref),
         "delivery_status": "delivered",  # DummyJSON has no shipment status; static for this slice
         "category": None,  # set by the claim, not the order — filled in by the Orchestrator agent
     }
@@ -564,18 +677,17 @@ def redact_photo(photo_base64: str) -> str:
 def get_product_reference(order_ref: str) -> dict:
     """title, description, reference_image_url for the first product on the
     order (DummyJSON /carts + /products) -- what analyze_image cross-checks
-    the claim photo against."""
-    cart_response = requests.get(f"https://dummyjson.com/carts/{order_ref}", timeout=10)
-    cart_response.raise_for_status()
-    cart = cart_response.json()
+    the claim photo against. Shares _fetch_cart's cache with get_order
+    (project-plan.md Q98): within one claim, both tools were independently
+    re-fetching the exact same DummyJSON cart -- a real, confirmed
+    duplicate call, not just a theoretical one."""
+    cart = _fetch_cart(order_ref)
     first_product = cart["products"][0] if cart.get("products") else {}
     product_id = first_product.get("id")
     if product_id is None:
         return {"title": "unknown", "description": None, "reference_image_url": None}
 
-    product_response = requests.get(f"https://dummyjson.com/products/{product_id}", timeout=10)
-    product_response.raise_for_status()
-    product = product_response.json()
+    product = _fetch_product(product_id)
     return {
         "title": product.get("title", "unknown"),
         "description": product.get("description"),

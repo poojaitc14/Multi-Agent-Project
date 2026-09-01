@@ -9,6 +9,19 @@ CREATE TABLE IF NOT EXISTS customers (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- project-plan.md Q98: DummyJSON carts have no purchase-date field at all,
+-- so there was previously no real value to check a customer's self-reported
+-- days_to_return against. get_order's _get_or_seed_order_date bootstrap-
+-- samples a stable synthetic order_date (1-60 days before "now") the first
+-- time a given order_ref is seen and persists it here -- the same pattern
+-- customer_profiles already uses for get_account_info, just keyed on
+-- order_ref instead of customer_ref.
+CREATE TABLE IF NOT EXISTS order_metadata (
+    order_ref TEXT PRIMARY KEY,
+    order_date TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS refund_transactions (
     order_ref TEXT NOT NULL,
     claim_ref TEXT NOT NULL,
@@ -59,4 +72,29 @@ CREATE TABLE IF NOT EXISTS review_queue (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     resolved_at TIMESTAMPTZ,
     transaction_id TEXT
+);
+
+-- project-plan.md Q96 (admin "All Claims" tab): a real, complete log of
+-- every claim ClaimTriageFlow ever finishes running -- not just the
+-- outcome='escalate' subset review_queue (Q72) tracks. claim_ref is the
+-- primary key and each real backend._run_claim() completion UPSERTs this
+-- row (ON CONFLICT DO UPDATE): a claim that first comes back
+-- outcome='re_prompt_for_photo' (the customer hasn't sent a photo yet)
+-- and is later re-run after the photo arrives updates this same row to
+-- its new, current state rather than creating a second row for the same
+-- claim_ref. No raw customer identifier lives here (Q27).
+CREATE TABLE IF NOT EXISTS claims (
+    claim_ref TEXT PRIMARY KEY,
+    customer_ref TEXT NOT NULL REFERENCES customers(customer_ref),
+    order_ref TEXT NOT NULL,
+    claim_category TEXT NOT NULL,
+    claim_description TEXT NOT NULL,
+    refund_amount_usd NUMERIC(10, 2) NOT NULL DEFAULT 0,
+    image_verdict TEXT,
+    fraud_risk_band TEXT,
+    decision TEXT,
+    outcome TEXT NOT NULL,
+    transaction_id TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

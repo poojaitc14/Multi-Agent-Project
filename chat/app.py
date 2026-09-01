@@ -59,7 +59,13 @@ st.markdown(
         --support-bad-soft: #FBE9E7;
       }
 
-      html, body, [class*="st-"], .stMarkdown, .stTextInput input, .stChatInput textarea {
+      /* Deliberately NOT [class*="st-"]: that selector also matches
+         Streamlit's internal icon-bearing elements (chevrons, clear
+         buttons, spinner glyphs), and forcing a text font onto a glyph
+         element is a real, known cause of garbled/overlapping-looking
+         characters -- scoped to actual text containers instead. */
+      html, body, .stMarkdown, .stMarkdown p, .stMarkdown li, .stMarkdown span,
+      .stTextInput input, .stChatInput textarea, .stChatMessage p {
         font-family: 'Inter', -apple-system, 'Segoe UI', sans-serif;
       }
 

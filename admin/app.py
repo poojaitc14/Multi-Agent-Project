@@ -20,6 +20,7 @@ Run with: uv run streamlit run admin/app.py
 
 import os
 
+import pandas as pd
 import requests
 import streamlit as st
 from dotenv import load_dotenv
@@ -60,7 +61,13 @@ st.markdown(
         --admin-bad-soft: #F9E4E2;
       }
 
-      html, body, [class*="st-"], .stMarkdown, .stTextInput input {
+      /* Deliberately NOT [class*="st-"]: that selector also matches
+         Streamlit's internal icon-bearing elements (chevrons, clear
+         buttons, spinner glyphs), and forcing a text font onto a glyph
+         element is a real, known cause of garbled/overlapping-looking
+         characters -- scoped to actual text containers instead. */
+      html, body, .stMarkdown, .stMarkdown p, .stMarkdown li, .stMarkdown span,
+      .stTextInput input {
         font-family: 'Inter', -apple-system, 'Segoe UI', sans-serif;
       }
 
@@ -132,6 +139,12 @@ def _render_sidebar_help() -> None:
 3. **Approve** issues a real refund through the same gated `issue_refund` path the system itself uses — this is not reversible.
 4. **Deny** closes the claim with no refund.
 
+**All Claims**
+Every claim the system has ever finished triaging — not just the ones escalated to human review. A claim still waiting on the customer to send a photo shows outcome `re_prompt_for_photo` and updates in place once they do.
+
+**Add Documents**
+Upload a policy document to add it to the Eval Agent's real retrieval index — it's chunked, embedded, and indexed for semantic search immediately, not just stored.
+
 **Tool Registry**
 Read-only. Shows exactly which MCP tools each agent is wired to call, straight from the real agent code — not a document that can drift out of date.
             """
@@ -198,6 +211,19 @@ def _render_tool_registry() -> None:
 
 _RISK_STYLE = {"low": "status-good", "medium": "status-warn", "high": "status-bad"}
 _VERDICT_STYLE = {"consistent": "status-good", "partially_consistent": "status-warn", "inconsistent": "status-bad", "no_photo": "status-info"}
+
+# Literal hex, not the --admin-* CSS custom properties: st.dataframe renders
+# through Streamlit's own data-grid component (glide-data-grid), a separate
+# rendering path from the page's injected <style> block above, so CSS
+# variables defined there don't resolve inside a pandas Styler's output.
+_OUTCOME_COLORS = {
+    "refunded": ("#E1F1E9", "#227A54"),
+    "escalate": ("#FBEBD8", "#A65C13"),
+    "deny": ("#F9E4E2", "#B33A34"),
+    "re_prompt_for_photo": ("#E4E9F3", "#202D4A"),
+    "image_analysis_unavailable": ("#F9E4E2", "#B33A34"),
+    "decision_unavailable": ("#F9E4E2", "#B33A34"),
+}
 
 
 def _pill(text: str, css_class: str) -> str:
@@ -277,6 +303,60 @@ def _render_reviewer_dashboard() -> None:
                     st.error(f"Failed: {decision.text}")
 
 
+def _render_all_claims_table() -> None:
+    st.subheader("All Claims")
+    st.caption("Every claim ClaimTriageFlow has finished running, real-time from the `claims` table (project-plan.md Q96).")
+
+    response = requests.get(f"{BACKEND_URL}/claims", headers=_auth_headers(), timeout=10)
+    response.raise_for_status()
+    items = response.json()
+
+    if not items:
+        st.info("No claims have been triaged yet.")
+        return
+
+    st.markdown(f'<span class="status-pill status-info">{len(items)} total</span>', unsafe_allow_html=True)
+    st.write("")
+
+    df = pd.DataFrame(items)
+    df["refund_amount_usd"] = df["refund_amount_usd"].map(lambda v: f"${v:.2f}")
+    df = df[[
+        "claim_ref", "order_ref", "claim_category", "outcome", "decision",
+        "image_verdict", "fraud_risk_band", "refund_amount_usd", "transaction_id", "updated_at",
+    ]].rename(columns={
+        "claim_ref": "Claim", "order_ref": "Order", "claim_category": "Category", "outcome": "Outcome",
+        "decision": "Decision", "image_verdict": "Image verdict", "fraud_risk_band": "Fraud risk",
+        "refund_amount_usd": "Amount", "transaction_id": "Transaction", "updated_at": "Last updated",
+    })
+
+    def _style_outcome(value: str) -> str:
+        bg, fg = _OUTCOME_COLORS.get(value, ("#F2F4F8", "#565F70"))
+        return f"background-color: {bg}; color: {fg}; font-weight: 600;"
+
+    styled = df.style.map(_style_outcome, subset=["Outcome"])
+    st.dataframe(styled, hide_index=True, width="stretch")
+
+
+def _render_add_documents() -> None:
+    st.subheader("Add Documents")
+    st.caption("Real ingestion into the Decision Agent's retrieval index — chunked, embedded, and indexed immediately, not just stored (project-plan.md Q96).")
+
+    uploaded = st.file_uploader("Policy or reference document", type=["md", "txt"])
+    if uploaded is not None and st.button("Ingest into retrieval index", type="primary"):
+        with st.spinner("Chunking, embedding, and indexing into OpenSearch Serverless — this takes ~20-30s..."):
+            response = requests.post(
+                f"{BACKEND_URL}/documents",
+                headers=_auth_headers(),
+                files={"document": (uploaded.name, uploaded.getvalue())},
+                timeout=90,
+            )
+        if response.status_code == 200:
+            result = response.json()
+            st.success(f"Indexed **{result['chunks_indexed']}** chunk(s) from `{result['source_document']}`. Searchable immediately.")
+        else:
+            st.error(f"Failed: {response.text}")
+
+
 def main() -> None:
     if not _password_gate():
         return
@@ -293,9 +373,15 @@ def main() -> None:
         """,
         unsafe_allow_html=True,
     )
-    tab_reviewer, tab_registry = st.tabs(["📋 Reviewer Dashboard", "🔧 Tool Registry"])
+    tab_reviewer, tab_claims, tab_documents, tab_registry = st.tabs(
+        ["📋 Reviewer Dashboard", "🗂️ All Claims", "📄 Add Documents", "🔧 Tool Registry"]
+    )
     with tab_reviewer:
         _render_reviewer_dashboard()
+    with tab_claims:
+        _render_all_claims_table()
+    with tab_documents:
+        _render_add_documents()
     with tab_registry:
         _render_tool_registry()
 

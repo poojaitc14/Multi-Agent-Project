@@ -28,9 +28,11 @@ requirement as agents/mcp_tools.py) -- this backend doesn't start it.
 
 import base64
 import os
+import sys
 import threading
 import time
 import uuid
+from pathlib import Path
 from typing import Optional
 
 import psycopg
@@ -48,6 +50,15 @@ from agents.mcp_tools import (
 )
 from agents.orchestrator_agent import build_intake_task, build_orchestrator_agent
 from agents.schemas import ClaimCategory
+
+# Q96: the Eval/Decision Agent's real RAG pipeline (chunk/embed/index into
+# OpenSearch Serverless) already lives in ml/rag/ as standalone scripts with
+# bare, non-package imports -- mcp-servers/orchestrator_server.py already
+# reaches it the same way, via sys.path, rather than duplicating the logic.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "ml" / "rag"))
+from chunk_document import chunk_document  # noqa: E402
+from embed_and_index import embed_texts, get_azure_client  # noqa: E402
+from index_chunks import ensure_index, get_opensearch_client, index_chunks  # noqa: E402
 
 app = FastAPI(title="Fraud Triage API")
 
@@ -173,6 +184,33 @@ def _insert_review_queue_row(customer_ref: str, s: ClaimState) -> None:
         conn.commit()
 
 
+def _upsert_claim_log_row(customer_ref: str, s: ClaimState) -> None:
+    """Q96: unlike `_insert_review_queue_row` above (Q72, only fires for
+    outcome=='escalate'), this logs EVERY claim outcome -- called once per
+    real `_run_claim()` completion, for the admin "All Claims" tab.
+    UPSERTed on claim_ref, not blindly inserted: a claim that first comes
+    back outcome='re_prompt_for_photo' and is later re-run after the
+    customer sends a photo updates the same row to its new, current state
+    rather than creating a second row for the same claim_ref."""
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO claims (claim_ref, customer_ref, order_ref, claim_category, claim_description, "
+                "refund_amount_usd, image_verdict, fraud_risk_band, decision, outcome, transaction_id, updated_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now()) "
+                "ON CONFLICT (claim_ref) DO UPDATE SET "
+                "refund_amount_usd = EXCLUDED.refund_amount_usd, image_verdict = EXCLUDED.image_verdict, "
+                "fraud_risk_band = EXCLUDED.fraud_risk_band, decision = EXCLUDED.decision, "
+                "outcome = EXCLUDED.outcome, transaction_id = EXCLUDED.transaction_id, updated_at = now()",
+                (
+                    s.claim_ref, customer_ref, s.order_ref, s.claim_category, s.claim_description,
+                    s.refund_amount_usd, s.image_verdict or None, s.fraud_risk_band or None,
+                    s.decision or None, s.outcome, s.transaction_id,
+                ),
+            )
+        conn.commit()
+
+
 def _run_claim(claim_ref: str, customer_identifier: str, customer_ref: str, order_ref: str, claim_category: str, claim_description: str, days_to_return: int) -> ClaimResponse:
     flow = ClaimTriageFlow()
     flow.kickoff(
@@ -185,6 +223,7 @@ def _run_claim(claim_ref: str, customer_identifier: str, customer_ref: str, orde
             "days_to_return": days_to_return,
         }
     )
+    _upsert_claim_log_row(customer_ref, flow.state)
     if flow.state.outcome == "escalate":
         _insert_review_queue_row(customer_ref, flow.state)
     return _build_claim_response(flow.state)
@@ -357,6 +396,89 @@ async def submit_message_photo(customer_identifier: str = Form(...), photo: Uplo
         store_photo.run(claim_ref=claim_ref, photo_base64=photo_base64)
 
     return PhotoUploadResponse(claim_ref=claim_ref)
+
+
+# --- All Claims (Q96) ----------------------------------------------------
+
+
+class ClaimLogItem(BaseModel):
+    claim_ref: str
+    order_ref: str
+    claim_category: str
+    claim_description: str
+    refund_amount_usd: float
+    image_verdict: Optional[str] = None
+    fraud_risk_band: Optional[str] = None
+    decision: Optional[str] = None
+    outcome: str
+    transaction_id: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
+@app.get("/claims", response_model=list[ClaimLogItem], dependencies=[Depends(require_reviewer)])
+def list_claims() -> list[ClaimLogItem]:
+    """Q96: every claim ClaimTriageFlow has ever finished running, not just
+    review_queue's escalated subset -- the admin "All Claims" tab's real
+    data source, backed by `claims` (see infra/init.sql)."""
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT claim_ref, order_ref, claim_category, claim_description, refund_amount_usd, "
+                "image_verdict, fraud_risk_band, decision, outcome, transaction_id, created_at, updated_at "
+                "FROM claims ORDER BY updated_at DESC"
+            )
+            rows = cur.fetchall()
+    return [
+        ClaimLogItem(
+            claim_ref=r[0], order_ref=r[1], claim_category=r[2], claim_description=r[3],
+            refund_amount_usd=float(r[4]), image_verdict=r[5], fraud_risk_band=r[6], decision=r[7],
+            outcome=r[8], transaction_id=r[9], created_at=r[10].isoformat(), updated_at=r[11].isoformat(),
+        )
+        for r in rows
+    ]
+
+
+# --- Add Documents (Q96) -------------------------------------------------
+
+
+class DocumentIngestResponse(BaseModel):
+    source_document: str
+    chunks_indexed: int
+
+
+@app.post("/documents", response_model=DocumentIngestResponse, dependencies=[Depends(require_reviewer)])
+async def upload_document(document: UploadFile = File(...)) -> DocumentIngestResponse:
+    """Q96: real RAG ingestion for the admin "Add Documents" tab, not just
+    file storage -- chunks (ml/rag/chunk_document.py, structure-agnostic
+    unlike chunk_policy.py's refund-policy-specific parser), embeds (the
+    same Azure text-embedding-3-small client ml/rag/embed_and_index.py
+    already uses), and indexes into the same real OpenSearch Serverless
+    index search_refund_policy already queries -- an uploaded document is
+    immediately retrievable by the Decision Agent, not a separate store."""
+    if not document.filename or not document.filename.lower().endswith((".md", ".txt")):
+        raise HTTPException(status_code=400, detail="Only .md and .txt documents are supported right now.")
+
+    raw = await document.read()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise HTTPException(status_code=400, detail="Document must be UTF-8 text.") from e
+
+    chunks = chunk_document(text, source_document=document.filename)
+    if not chunks:
+        raise HTTPException(status_code=400, detail="Document had no content to index.")
+
+    azure_client = get_azure_client()
+    embeddings = embed_texts(azure_client, [c["text"] for c in chunks])
+    for chunk, vector in zip(chunks, embeddings):
+        chunk["embedding"] = vector
+
+    os_client = get_opensearch_client()
+    ensure_index(os_client)
+    index_chunks(os_client, chunks)  # real OpenSearch Serverless refresh delay -- this call blocks ~20s
+
+    return DocumentIngestResponse(source_document=document.filename, chunks_indexed=len(chunks))
 
 
 # --- Reviewer Dashboard (Q20/Q31/Q72) -----------------------------------
