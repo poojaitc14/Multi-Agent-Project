@@ -15,6 +15,7 @@ names like "claim_category_Change of Mind" are still real, traceable
 feature names, just more granular than the raw column name.
 """
 
+import pickle
 import time
 from pathlib import Path
 
@@ -22,9 +23,6 @@ import mlflow
 import numpy as np
 import pandas as pd
 import shap
-from sklearn.compose import ColumnTransformer
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 # Absolute, not relative -- relative paths broke the moment this got
 # imported from mcp-servers/ instead of run directly from the repo root.
@@ -50,8 +48,19 @@ REGISTRY_NAME = "fraud-risk-scoring"
 # registry-loaded model on 10 real sample rows before switching load_model()
 # over to this path.
 PRODUCTION_MODEL_PATH = str(_ML_DIR / "production_model")
+
+# project-plan.md Q92: a fitted ColumnTransformer + a transformed SHAP
+# background sample, pickled once by ml/build_fraud_transformer.py rather
+# than refit from ml/data/synthetic_fraud_risk_dataset.csv on every single
+# server startup (real, unnecessary repeated work every time the code got
+# pushed or the server restarted). Re-run that script and re-commit these
+# two files if NUMERIC_COLS/BOOL_COLS/CATEGORICAL_COLS or the training
+# data itself ever changes -- otherwise there's nothing to regenerate,
+# since the output is fully deterministic (same file, same split, same
+# random_state).
+TRANSFORMER_PATH = _ML_DIR / "fraud_transformer.pkl"
+BACKGROUND_PATH = _ML_DIR / "fraud_background.pkl"
 DATA_PATH = str(_ML_DIR / "data" / "synthetic_fraud_risk_dataset.csv")
-RANDOM_STATE = 42  # matches ml/model_training.ipynb exactly
 
 NUMERIC_COLS = [
     "account_age_days", "total_orders_lifetime", "total_returns_lifetime", "claim_frequency_90d",
@@ -67,39 +76,14 @@ def load_model():
     return mlflow.sklearn.load_model(PRODUCTION_MODEL_PATH)
 
 
-def build_and_fit_transformer() -> ColumnTransformer:
-    """The registered model was trained on ml/model_training.ipynb's
-    X_train_transformed, not raw columns -- the ColumnTransformer itself
-    was never saved as an MLflow artifact. Rebuilding + refitting it here
-    on the exact same split (same file, same random_state, same
-    train_test_split calls) reproduces an equivalent fitted transformer,
-    since none of that is random beyond the seeded split."""
-    df = pd.read_csv(DATA_PATH)
-    X = df[FEATURE_COLS]
-    y = df["fraud_risk_label"]
-    X_trainval, _, y_trainval, _ = train_test_split(X, y, test_size=0.2, random_state=RANDOM_STATE, stratify=y)
-    X_train, _, _, _ = train_test_split(X_trainval, y_trainval, test_size=0.25, random_state=RANDOM_STATE, stratify=y_trainval)
-
-    transformer = ColumnTransformer(
-        transformers=[
-            ("numeric", StandardScaler(), NUMERIC_COLS),
-            ("boolean", "passthrough", BOOL_COLS),
-            ("categorical", OneHotEncoder(handle_unknown="ignore", sparse_output=False), CATEGORICAL_COLS),
-        ],
-        remainder="drop",
-        verbose_feature_names_out=False,
-    )
-    transformer.fit(X_train)
-    return transformer
+def load_transformer():
+    with open(TRANSFORMER_PATH, "rb") as f:
+        return pickle.load(f)
 
 
-def load_background(transformer: ColumnTransformer, n: int = 50) -> np.ndarray:
-    """A small real sample, transformed, to serve as SHAP's reference
-    distribution -- not the claim being explained, just typical feature
-    values to compare against."""
-    df = pd.read_csv(DATA_PATH)
-    sample = df[FEATURE_COLS].sample(n=n, random_state=42)
-    return transformer.transform(sample)
+def load_background() -> np.ndarray:
+    with open(BACKGROUND_PATH, "rb") as f:
+        return pickle.load(f)
 
 
 def build_explainer(model, background: np.ndarray) -> shap.Explainer:
@@ -126,9 +110,9 @@ class FraudAttributor:
 
     def __init__(self):
         self.model = load_model()
-        self.transformer = build_and_fit_transformer()
+        self.transformer = load_transformer()
         self.feature_names = list(self.transformer.get_feature_names_out())
-        self.explainer = build_explainer(self.model, load_background(self.transformer))
+        self.explainer = build_explainer(self.model, load_background())
 
     def score(self, raw_features: dict, top_n: int = 3) -> dict:
         """raw_features: a dict with FEATURE_COLS as keys (what the Fraud
@@ -155,10 +139,10 @@ class FraudAttributor:
 if __name__ == "__main__":
     print("Loading production model (v13, exported artifact)...")
     model = load_model()
-    print("Rebuilding + refitting the ColumnTransformer (same split as training)...")
-    transformer = build_and_fit_transformer()
+    print("Loading the pre-fitted ColumnTransformer (ml/build_fraud_transformer.py's output)...")
+    transformer = load_transformer()
     feature_names = list(transformer.get_feature_names_out())
-    background = load_background(transformer)
+    background = load_background()
 
     print("Building SHAP explainer (this is the potentially-slow part)...")
     start = time.time()
