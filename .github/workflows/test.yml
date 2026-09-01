@@ -53,6 +53,13 @@ jobs:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/fraud_triage
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      # project-plan.md Q91: the repo's AWS credentials are temporary STS
+      # ones (ASIA-prefixed access key) -- these require a session token to
+      # authenticate at all, confirmed for real (UnrecognizedClientException
+      # without one). Accepted, explicit tradeoff over long-lived IAM
+      # credentials: this secret needs re-pasting whenever the underlying
+      # session expires (hours), not a one-time setup.
+      AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
       AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
       CONVERSATION_STATE_TABLE: conversation-state-ci
       CLAIM_PHOTOS_BUCKET: claim-photos-ci
