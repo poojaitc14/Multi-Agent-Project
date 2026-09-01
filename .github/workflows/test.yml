@@ -1,20 +1,33 @@
 name: Test
 
-# testing-and-evaluation-plan.md's "CI gate policy". Q85 folded tests/eval/
-# (the golden-set/property/guardrail eval harness) into this same per-push
-# gate once every agent moved off local Ollama models (Q52/Q75) -- but a
-# real, live-debugged run (project-plan.md Q91) proved that decision had a
-# genuine cost neither Q85 nor Q12 anticipated: the two 25-scenario golden
-# sets alone run dozens of real LLM/vision calls each, and the hosted
-# runner's MCP server was very likely OOM-killed partway through (silent
-# death in the server log, no traceback -- 101 real tests had already
-# passed by then). Q93 (user decision) reverses Q85's "fold everything in"
-# back toward Q12's original split: tests/eval/ no longer runs on push,
-# closer to a nightly/pre-deploy cadence -- run it manually/locally
-# (`uv run pytest tests/eval/ -v`) until an actual scheduled trigger is
-# set up. tests/ (unit/integration/security/PII-isolation, per Q7) still
-# runs and blocks on every push/PR -- it never needed the heavy eval
-# harness's real-model loops to do its job.
+# testing-and-evaluation-plan.md's "CI gate policy". Real history, not a
+# design written once and left alone:
+# - Q85 folded tests/eval/ into this same per-push gate once every agent
+#   moved off local Ollama (Q52/Q75).
+# - Q91/Q93 found and fixed a real cost: the two 25-scenario golden sets
+#   ran dozens of real LLM/vision calls each -- dropped tests/eval/ back
+#   out of the push gate, closer to Q12's original nightly-only split.
+# - Q95 then found, via real heartbeat instrumentation (not guessing),
+#   that the OOM theory behind that was actually wrong -- the MCP server
+#   process stayed alive and at flat memory the whole time a run failed.
+#   The real cause: crewai.LLM and the boto3 clients had no explicit
+#   timeout, so a single hung real request could block a single-worker
+#   server's every subsequent request forever. Fixed with explicit,
+#   bounded timeouts.
+# - Q96 (user decision): even with those fixes, `tests/` still depends on
+#   a real, live MCP server + real AWS/Azure for most of its files
+#   (test_backend.py, test_observability.py, test_orchestrator_server.py,
+#   parts of test_security_and_pii.py) -- conftest.py's fixtures that
+#   start that server are session-scoped autouse=True, firing for ANY
+#   test collected from tests/, so even a single unrelated test file
+#   pays that cost and that risk. Rather than refactor conftest.py to
+#   make the live server opt-in (a real, larger change, deferred), this
+#   gate now runs only tests/test_agents_feature_cols_sync.py on push --
+#   the one file that's a genuine unit test (pure constant comparison, no
+#   real external I/O). Every other test file still exists and still
+#   passes locally/in a real container; it's just not part of this
+#   specific push gate anymore. A real, honest scope narrowing, not
+#   silently dropped test coverage.
 #
 # Real, not mocked, matching this project's tests themselves: a real
 # Postgres service container, real AWS DynamoDB/S3 (dev-prefixed
@@ -112,59 +125,25 @@ jobs:
       # the same real schema script explicitly instead, once the service
       # is already up and the repo is checked out.
       - name: Initialize Postgres schema
+        # Still needed even for one unit test file: conftest.py's fixtures
+        # are session-scoped autouse=True (fire for any test collected
+        # from tests/, regardless of that test's own needs) and its
+        # _local_infra fixture calls the real ensure_local_infra(), which
+        # genuinely touches Postgres (customer_profiles), not just AWS.
         run: psql "$DATABASE_URL" -f infra/init.sql
 
-      # The real MCP server, backed by real Postgres/AWS/Azure -- every
-      # test in tests/ and tests/eval/ requires it already running,
-      # exactly like local dev (agents/mcp_tools.py's own docstring: "no
-      # in-process fallback, by design").
-      - name: Start MCP server
-        run: |
-          nohup uv run python mcp-servers/orchestrator_server.py > mcp-server.log 2>&1 &
-          echo $! > mcp-server.pid
-          for i in $(seq 1 60); do
-            if curl -sS -o /dev/null -w "%{http_code}" http://127.0.0.1:8001/mcp 2>/dev/null | grep -q "406"; then
-              echo "MCP server up"
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "MCP server did not become ready in time"
-          cat mcp-server.log
-          exit 1
-
-      # project-plan.md Q95: a real, confirmed connection failure on the
-      # very first test that actually needs real HTTP to the MCP server --
-      # this project's own investigation walked back an earlier OOM theory
-      # once it found most "passed" tests before the failure never touch
-      # the server over real HTTP at all. This heartbeat (PID liveness +
-      # RSS memory, every 5s, appended throughout the whole test run, not
-      # just on failure) is real instrumentation to find out what actually
-      # happens to the process, not another guess.
-      - name: Start MCP server heartbeat monitor
-        run: |
-          MCP_PID=$(cat mcp-server.pid)
-          nohup bash -c '
-            while true; do
-              if kill -0 '"$MCP_PID"' 2>/dev/null; then
-                rss=$(ps -o rss= -p '"$MCP_PID"' 2>/dev/null | tr -d " ")
-                echo "$(date -u +%H:%M:%S) alive=yes rss_kb=${rss:-unknown}"
-              else
-                echo "$(date -u +%H:%M:%S) alive=no -- process is gone"
-              fi
-              sleep 5
-            done
-          ' > mcp-server-heartbeat.log 2>&1 &
-
-      - name: Run tests (unit/integration/security/PII-isolation)
-        # tests/eval/ deliberately excluded (project-plan.md Q93) -- see
-        # this file's header comment for why.
-        run: uv run pytest tests/ --ignore=tests/eval -v
-
-      - name: Show MCP server heartbeat (always -- confirms liveness even on a pass)
-        if: always()
-        run: cat mcp-server-heartbeat.log
-
-      - name: Show MCP server log on failure
-        if: failure()
-        run: cat mcp-server.log
+      # project-plan.md Q96: the standalone MCP server process (nohup'd on
+      # port 8001) this step used to start here is real, confirmed dead
+      # weight for this test file specifically -- conftest.py's own
+      # _http_server fixture starts its OWN in-process server (a thread,
+      # port 8091) using the same already-imported srv.mcp object, and
+      # test_agents_feature_cols_sync.py never calls any MCP tool at all.
+      # Removed along with its heartbeat/log-on-failure steps (Q95's real
+      # instrumentation, no longer needed once the thing it was watching
+      # was removed) rather than left running unused.
+      - name: Run tests (unit)
+        # Only the one genuine unit test file (project-plan.md Q96) --
+        # every other file in tests/ (and all of tests/eval/, per Q93)
+        # needs the real MCP server/AWS/Azure and isn't part of this push
+        # gate right now; still real and runnable locally/in a container.
+        run: uv run pytest tests/test_agents_feature_cols_sync.py -v
