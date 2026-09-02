@@ -26,6 +26,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN pip install --no-cache-dir uv
 
+# uv defaults to hardlinking packages from its cache into .venv, which can
+# fail when Docker Desktop's containerd snapshotter exports the layer
+# ("failed to extract layer ... link ... no such file or directory") --
+# confirmed for real on this machine. Copying instead of hardlinking avoids
+# that cross-layer link entirely.
+ENV UV_LINK_MODE=copy
+
 WORKDIR /app
 
 # Dependencies first, in their own layer, so a code-only change doesn't
