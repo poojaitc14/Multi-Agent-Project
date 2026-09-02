@@ -32,6 +32,19 @@ _IMAGES_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "images"
 class DecisionReferenceScenario:
     scenario_id: str  # must match a golden_set.py GoldenScenario.scenario_id
     reference_rationale: str
+    # project-plan.md Q102: a SEPARATE reference, deliberately stripped to
+    # only real, retrievable docs/refund_policy.md clause language -- no
+    # image/fraud-verdict facts, which reference_rationale above legitimately
+    # includes (it's shared with the semantic-similarity metric, where a
+    # realistic-answer-shaped reference is correct). RAGAS's ContextRecall
+    # decomposes whatever reference it's given into claims and checks each
+    # against retrieved_contexts (policy chunks only) -- feeding it
+    # reference_rationale meant every non-policy claim in that reference was
+    # correctly (by RAGAS's own definition) marked unsupported, which is why
+    # context_recall came back near 0 even though retrieval itself was fine
+    # (context_precision was already 96.7%). This field exists so
+    # context_recall measures what it's actually meant to measure.
+    policy_only_reference: str = ""
     expected_claim_categories: list = field(default_factory=list)
     expected_monetary_amounts: list = field(default_factory=list)
 
@@ -56,6 +69,12 @@ DECISION_REFERENCE_SCENARIOS = [
             "fraud risk is low, so the claim is approved for a full refund to the original payment "
             "method, per the policy's Damaged in Transit and decision-matrix rules."
         ),
+        policy_only_reference=(
+            "Damaged in Transit: item arrived physically damaged, photo evidence required, eligible "
+            "for full refund to the original payment method when within the return window and photo "
+            "evidence is consistent with the claim. Decision matrix: when the image verdict is "
+            "consistent and fraud risk is low, the matrix auto-approves."
+        ),
         expected_claim_categories=["Damaged in Transit"],
         expected_monetary_amounts=["$45.00"],
     ),
@@ -65,6 +84,10 @@ DECISION_REFERENCE_SCENARIOS = [
             "Because the fraud risk is high, the claim is escalated to human review regardless of "
             "the partially consistent photo evidence, per the decision matrix's rule that any high "
             "fraud-risk band escalates."
+        ),
+        policy_only_reference=(
+            "Decision matrix: when the image verdict is partially consistent and fraud risk is high, "
+            "the matrix escalates to human review."
         ),
         expected_claim_categories=["Not as Described"],
         expected_monetary_amounts=["$115.00"],
@@ -76,6 +99,10 @@ DECISION_REFERENCE_SCENARIOS = [
             "risk is low, the decision matrix escalates an inconsistent-and-low combination to human "
             "review rather than auto-denying or auto-approving it."
         ),
+        policy_only_reference=(
+            "Decision matrix: when the image verdict is inconsistent and fraud risk is low, the "
+            "matrix escalates to human review, rather than auto-approving or auto-denying."
+        ),
         expected_claim_categories=["Damaged in Transit"],
         expected_monetary_amounts=["$129.00"],
     ),
@@ -86,6 +113,13 @@ DECISION_REFERENCE_SCENARIOS = [
             "credit only, not a refund to the original payment method; with consistent evidence and "
             "medium fraud risk, the claim is approved."
         ),
+        policy_only_reference=(
+            "Change of Mind: no defect, the customer simply doesn't want the item, no photo required, "
+            "store credit only rather than a refund to the original payment method, item must be "
+            "unused/unopened, governed by the 14-day sub-window rather than the standard 30-day "
+            "window. Decision matrix: when the image verdict is consistent and fraud risk is medium, "
+            "the matrix auto-approves."
+        ),
         expected_claim_categories=["Change of Mind"],
         expected_monetary_amounts=["$60.00"],
     ),
@@ -95,6 +129,11 @@ DECISION_REFERENCE_SCENARIOS = [
             "Although the photo evidence is consistent and fraud risk is low, which would normally "
             "approve the claim, the refund amount of $350 exceeds the $200 guardrail threshold, so "
             "the claim must escalate to human review regardless of the matrix outcome."
+        ),
+        policy_only_reference=(
+            "Guardrail: any claim with a refund amount above $200 always escalates to human review, "
+            "regardless of the decision matrix outcome; this guardrail overrides every other rule and "
+            "cannot be bypassed by any combination of consistency and risk."
         ),
         expected_claim_categories=["Damaged in Transit"],
         expected_monetary_amounts=["$350.00"],

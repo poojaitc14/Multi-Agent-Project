@@ -74,6 +74,14 @@ CREATE TABLE IF NOT EXISTS review_queue (
     transaction_id TEXT
 );
 
+-- project-plan.md Q100: NULL until the Customer Chat Frontend has actually
+-- shown the customer this decision -- POST /claim-updates sets it to now()
+-- the same call it returns the decision in, so a reviewer's approve/deny
+-- is surfaced to the customer exactly once, not on every subsequent poll.
+-- ADD COLUMN IF NOT EXISTS (not just part of CREATE TABLE) so this also
+-- migrates an already-initialized live review_queue, not just a fresh one.
+ALTER TABLE review_queue ADD COLUMN IF NOT EXISTS customer_notified_at TIMESTAMPTZ;
+
 -- project-plan.md Q96 (admin "All Claims" tab): a real, complete log of
 -- every claim ClaimTriageFlow ever finishes running -- not just the
 -- outcome='escalate' subset review_queue (Q72) tracks. claim_ref is the
@@ -97,4 +105,21 @@ CREATE TABLE IF NOT EXISTS claims (
     transaction_id TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- project-plan.md Q99: which real DummyJSON orders a customer_ref "owns" --
+-- there was previously no ownership concept anywhere in this system
+-- (order_ref was a free-typed value any customer could submit for any
+-- order). Bootstrap-sampled once per customer_ref (3 real, distinct
+-- DummyJSON carts, real product titles/amounts) by
+-- _get_or_seed_customer_orders on first use, then stable -- the real data
+-- source for the Customer Chat Frontend's "which order is this about?"
+-- dropdown.
+CREATE TABLE IF NOT EXISTS customer_orders (
+    customer_ref TEXT NOT NULL REFERENCES customers(customer_ref),
+    order_ref TEXT NOT NULL,
+    product_title TEXT NOT NULL,
+    amount_usd NUMERIC(10, 2) NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (customer_ref, order_ref)
 );

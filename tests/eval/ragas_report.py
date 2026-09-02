@@ -15,8 +15,21 @@ reference_answers.py's DECISION_REFERENCE_SCENARIOS: RAGAS's ContextRecall
 metric (confirmed via direct introspection of this project's installed
 ragas==0.4.3, not assumed from docs: `ascore(user_input, retrieved_contexts,
 reference)`) decomposes a REFERENCE ANSWER into claims and checks how many
-are supported by retrieved_contexts -- exactly what those hand-written
-reference_rationale strings already are, so no new reference data needed.
+are supported by retrieved_contexts.
+
+Q102 revision: context_recall now scores against `policy_only_reference`
+(a second, dedicated field on DecisionReferenceScenario), not the general-
+purpose `reference_rationale` shared with the semantic-similarity metric.
+The first real run found context_recall averaging 10% even though
+context_precision was 96.7% -- retrieval was genuinely fine; the reference
+just wasn't policy-only, so its true-but-non-policy claims ("fraud risk is
+low") were correctly marked unsupported by a metric that only ever checks
+against retrieved policy text. Faithfulness had the same root cause from
+the response side, fixed by scoring it against `widened_contexts` (the
+real policy chunks plus a synthetic summary of the claim's own given
+facts) instead of `retrieved_contexts` alone -- context_precision still
+scores against the real, unmodified `retrieved_contexts`, since widening
+that one would stop it from measuring actual retrieval quality.
 
 Real, not mocked: every scenario makes a genuine search_refund_policy call
 against the real OpenSearch Serverless collection (project-plan.md Q81),
@@ -123,11 +136,30 @@ def run_real_scenario(scenario) -> dict:
         or sequence.index("search_refund_policy") < sequence.index("apply_decision_matrix")
     )
 
+    # project-plan.md Q102: the Decision Agent's real reasoning legitimately
+    # cites real facts (image verdict, fraud risk band, refund amount) that
+    # were genuinely given to it as task inputs, not retrieved via
+    # search_refund_policy -- Faithfulness previously only ever saw the
+    # policy chunks as "context", so every one of those true, given-fact
+    # statements was correctly-by-RAGAS's-own-definition marked unsupported.
+    # This widened context represents everything the agent legitimately had
+    # access to, not just the retrieval subset -- used for faithfulness
+    # only, never context_precision (which must stay scoped to what
+    # search_refund_policy actually retrieved, or it stops measuring
+    # retrieval quality at all).
+    claim_facts_context = (
+        f"Claim context (given, not retrieved): image consistency verdict is "
+        f"'{scenario.image_verdict}', fraud risk band is '{scenario.fraud_risk_band}', "
+        f"refund amount is ${scenario.refund_amount_usd:.2f}."
+    )
+
     return {
         "user_input": query,
         "response": result.pydantic.reasoning,
         "retrieved_contexts": retrieved_contexts,
+        "widened_contexts": retrieved_contexts + [claim_facts_context],
         "reference": _REFERENCE_BY_SCENARIO_ID[scenario.scenario_id].reference_rationale,
+        "policy_only_reference": _REFERENCE_BY_SCENARIO_ID[scenario.scenario_id].policy_only_reference,
         "routing_ok": routing_ok,
         "sequence_ok": sequence_ok,
         "called_tools": sorted(called_tools),
@@ -135,14 +167,25 @@ def run_real_scenario(scenario) -> dict:
 
 
 async def score_scenario(scenario_id, real, context_precision, context_recall, faithfulness, answer_relevancy) -> dict:
+    # context_precision: real retrieved_contexts only -- must stay scoped to
+    # what search_refund_policy actually returned, or it stops measuring
+    # retrieval quality.
     precision_result = await context_precision.ascore(
         user_input=real["user_input"], response=real["response"], retrieved_contexts=real["retrieved_contexts"],
     )
+    # context_recall: policy_only_reference (Q102), not the general-purpose
+    # reference_rationale shared with the similarity metric -- so recall
+    # measures "did retrieval get the right policy content", not "does the
+    # reference's non-policy facts happen to appear in policy chunks".
     recall_result = await context_recall.ascore(
-        user_input=real["user_input"], reference=real["reference"], retrieved_contexts=real["retrieved_contexts"],
+        user_input=real["user_input"], reference=real["policy_only_reference"],
+        retrieved_contexts=real["retrieved_contexts"],
     )
+    # faithfulness: widened_contexts (Q102) -- includes the real, given
+    # claim-context facts the response legitimately draws from, not just
+    # the policy subset.
     faithfulness_result = await faithfulness.ascore(
-        user_input=real["user_input"], response=real["response"], retrieved_contexts=real["retrieved_contexts"],
+        user_input=real["user_input"], response=real["response"], retrieved_contexts=real["widened_contexts"],
     )
     relevancy_result = await answer_relevancy.ascore(user_input=real["user_input"], response=real["response"])
     return {

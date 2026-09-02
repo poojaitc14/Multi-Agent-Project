@@ -18,6 +18,7 @@ Run with: uv run streamlit run chat/app.py --server.port 8503
 """
 
 import os
+from typing import Optional
 
 import requests
 import streamlit as st
@@ -137,8 +138,8 @@ def _render_sidebar_help() -> None:
         st.markdown(
             """
 1. **Sign in** with the email or customer ID on your order — no password needed.
-2. **Describe your issue** in plain language: what happened, which order, roughly when. For example:
-   *"Order 10 arrived damaged, the box was crushed. It was 2 days ago."*
+2. **Pick the order** from the dropdown (your own real orders), then **describe your issue** in plain language: what happened, roughly when. For example:
+   *"It arrived damaged, the box was crushed. It was 2 days ago."*
 3. If your claim category needs one, we'll **ask for a photo** — attach it with the uploader that appears below the chat.
 4. After that, **send one more short message** (e.g. "here's the photo") so we can finish reviewing your claim — uploading a photo alone doesn't restart the review.
 5. You'll get a real verdict: **approved**, **denied**, **escalated to a human reviewer**, or **more information needed**.
@@ -150,7 +151,7 @@ def _render_sidebar_help() -> None:
         if st.session_state.get("customer_identifier"):
             st.divider()
             if st.button("Start a new session"):
-                for key in ("customer_identifier", "chat_history", "last_uploaded_photo_name"):
+                for key in ("customer_identifier", "chat_history", "last_uploaded_photo_name", "my_orders"):
                     st.session_state.pop(key, None)
                 st.rerun()
 
@@ -232,10 +233,76 @@ def _message_response_to_chat_text(response: dict) -> str:
     return "Thanks for your message — we're looking into it."
 
 
-def _send_message(text: str) -> None:
+# review_queue's own status vocabulary (Q72: "approved"/"denied", set by a
+# human reviewer's decision) -- distinct from _OUTCOME_STYLE above, which
+# covers ClaimResponse.outcome (the Flow's own immediate result, e.g.
+# "escalate"/"deny"/"refunded"). Kept as two separate mappings rather than
+# merged, since the two vocabularies aren't the same strings for the same
+# real-world outcome (Flow's "deny" vs. reviewer's "denied").
+_REVIEW_STATUS_STYLE = {
+    "approved": ("status-good", "✅ Refund issued"),
+    "denied": ("status-bad", "❌ Not approved"),
+}
+
+
+def _check_claim_updates() -> None:
+    """Q100: how the customer finds out a human reviewer later approved or
+    denied their escalated claim -- polled on every render (cheap: a single
+    indexed Postgres lookup), since this Streamlit app has no server-push
+    mechanism to be told the moment a reviewer acts. POST /claim-updates
+    only ever returns a given decision once (it marks itself notified
+    server-side), so this can't double-announce the same decision."""
+    try:
+        response = requests.post(
+            f"{BACKEND_URL}/claim-updates",
+            json={"customer_identifier": st.session_state["customer_identifier"]},
+            timeout=10,
+        )
+    except requests.RequestException:
+        return
+    if response.status_code != 200:
+        return
+    for update in response.json():
+        css_class, label = _REVIEW_STATUS_STYLE.get(update["status"], ("status-info", update["status"]))
+        pill = f'<span class="status-pill {css_class}">{label}</span><br>'
+        if update["status"] == "approved":
+            body = (
+                f"Good news — claim `{update['claim_ref']}` (order `{update['order_ref']}`) was approved by our "
+                f"review team and your refund has been issued (transaction `{update.get('transaction_id')}`)."
+            )
+        else:
+            body = (
+                f"Claim `{update['claim_ref']}` (order `{update['order_ref']}`) was reviewed by our team and "
+                f"could not be approved."
+            )
+        st.session_state["chat_history"].append({"role": "assistant", "content": pill + body})
+
+
+def _fetch_my_orders() -> list[dict]:
+    """Q99: cached per session_state, not re-fetched every rerun -- the
+    real data source is list_customer_orders (bootstrap-seeded once per
+    customer_ref, then stable), so re-fetching mid-session would only add
+    a request with no new information."""
+    if "my_orders" not in st.session_state:
+        try:
+            response = requests.post(
+                f"{BACKEND_URL}/orders",
+                json={"customer_identifier": st.session_state["customer_identifier"]},
+                timeout=15,
+            )
+            st.session_state["my_orders"] = response.json() if response.status_code == 200 else []
+        except requests.RequestException:
+            st.session_state["my_orders"] = []
+    return st.session_state["my_orders"]
+
+
+def _send_message(text: str, order_ref: Optional[str] = None) -> None:
+    payload = {"customer_identifier": st.session_state["customer_identifier"], "message": text}
+    if order_ref:
+        payload["order_ref"] = order_ref
     response = requests.post(
         f"{BACKEND_URL}/messages",
-        json={"customer_identifier": st.session_state["customer_identifier"], "message": text},
+        json=payload,
         # project-plan.md Q90/Q91: 180s was confirmed too short for real
         # traffic -- a claim that already has its photo chains Image
         # Parsing (real vision call) -> Fraud Scoring (real DynamoDB/
@@ -289,6 +356,8 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
+    _check_claim_updates()
+
     if not st.session_state["chat_history"]:
         st.markdown(
             '<span class="status-pill status-info">👋 Getting started</span><br>'
@@ -302,6 +371,26 @@ def main() -> None:
         with st.chat_message(message["role"], avatar=avatar):
             st.markdown(message["content"], unsafe_allow_html=True)
 
+    # project-plan.md Q101: no free-text fallback for order_ref anymore --
+    # the backend now only ever accepts an order_ref that's actually one of
+    # this customer's own real orders (Q99), and the intake LLM is no
+    # longer even asked to extract one from the message. Picking from this
+    # dropdown is the only way to attach a claim to an order.
+    my_orders = _fetch_my_orders()
+    selected_order_ref: Optional[str] = None
+    if my_orders:
+        order_labels = {
+            (
+                f"Order {o['order_ref']} — {o['product_title']} (${o['amount_usd']:.2f}) — "
+                + ("within return window" if o["returnable"] else "outside 30-day return window")
+            ): o["order_ref"]
+            for o in my_orders
+        }
+        choice = st.selectbox("Which order is this about? (required)", list(order_labels.keys()))
+        selected_order_ref = order_labels.get(choice)
+    else:
+        st.warning("We couldn't load your orders right now — please refresh the page and try again.")
+
     uploaded_file = st.file_uploader("📎 Attach a photo (only if asked — for damaged/incorrect item claims)", type=["jpg", "jpeg", "png"])
     if uploaded_file is not None and uploaded_file.name != st.session_state.get("last_uploaded_photo_name"):
         st.session_state["last_uploaded_photo_name"] = uploaded_file.name
@@ -314,7 +403,7 @@ def main() -> None:
     if user_text:
         st.session_state["chat_history"].append({"role": "user", "content": user_text})
         with st.spinner("Reviewing your claim — this can take a few minutes for a full review..."):
-            _send_message(user_text)
+            _send_message(user_text, selected_order_ref)
         st.rerun()
 
 

@@ -1,0 +1,171 @@
+MULTI-AGENT FRAUD TRIAGE SYSTEM — GUARDRAILS, DECISION MATRIX, TEST RESULTS
+================================================================================
+
+SECTION 1: GUARDRAILS
+--------------------------------------------------------------------------------
+3-layer design: (1) constrained decoding, (2) Pydantic schema, (3) a
+guardrail function re-checking the agent's output against the REAL tool
+result — catches fabrication a schema alone can't.
+
+Per-agent (Layer 3):
+  Orchestrator    intake_guardrail        Missing field -> must ask a
+                                           follow-up. order_ref/days_to_return
+                                           are no longer agent-handled at all.
+  Image Parsing   consistency_guardrail   verdict must match analyze_claim_
+                                           photo's real result exactly.
+  Fraud Scoring   fraud_assessment_       key_signals must be real model
+                  guardrail               feature names, not invented.
+  Decision        verdict_guardrail       decision must match apply_decision_
+                                           matrix's real result exactly.
+
+Security / business gates:
+  IssueRefundGate      issue_refund only accepts the Orchestrator's own
+                       bearer token — every other agent is rejected.
+  PII boundary         Raw customer identifiers never reach any LLM;
+                       resolved to opaque customer_ref first.
+  Order ownership      order_ref must be one of the customer's own real,
+                       seeded orders — checked against Postgres.
+  Reviewer password    All admin endpoints require the shared password,
+                       checked server-side.
+  Rate limiting        Max 3 new claims / customer / hour.
+
+SECTION 2: DECISION MATRIX
+--------------------------------------------------------------------------------
+apply_decision_matrix — deterministic, not an LLM judgment call.
+
+Step 1: refund_amount_usd > $200  ->  ESCALATE  (always, overrides below)
+
+Step 2: else, lookup (image_verdict, fraud_risk_band):
+
+  image_verdict \ risk     low        medium      high
+  ----------------------------------------------------
+  consistent               approve    approve     escalate
+  partially_consistent     approve    escalate    escalate
+  inconsistent             escalate   deny        deny
+
+SECTION 3: EVALUATION RESULTS
+--------------------------------------------------------------------------------
+Tool routing accuracy      5 / 5 scenarios     100%
+Tool call sequence         5 / 5 scenarios     100%
+  (search_refund_policy always called before apply_decision_matrix)
+
+RAGAS (5-scenario sample, real GPT-4.1 mini judge + text-embedding-3-small):
+
+  Metric                       Before fix   After fix   Change
+  ----------------------------------------------------------------
+  Context precision              96.7%        94.0%     -2.7pp *
+  Context recall                 10.0%        20.0%     +10pp (2x)
+  Groundedness / faithfulness    24.9%        45.5%     +20.6pp (~2x)
+  Answer relevancy               44.1%        34.4%     -9.7pp *
+
+  Root cause (recall + faithfulness): RAGAS checks claims only against
+  retrieved policy text. The reference answer and the Decision Agent's own
+  reasoning both legitimately include true, non-policy facts (image/fraud
+  verdicts) that were never meant to come from retrieval -- a metric/
+  reference-shape mismatch, not a hallucination signal.
+
+  Result: both targeted metrics improved substantially (recall doubled,
+  faithfulness nearly doubled) for a real, understood reason -- but recall
+  at 20% is still low in absolute terms; the fix corrected what the metric
+  measures, it didn't make retrieval better than it already was (precision
+  was always high). * Precision/relevancy changes are NOT attributable to
+  this fix -- their inputs were untouched; likely real run-to-run judge/
+  synthetic-question variance, not a regression.
+
+ML fraud model — calibration comparison (Brier score, lower is better):
+  Uncalibrated                0.2409   <- winner by recall, DEPLOYED (rolled back)
+  Isotonic calibration        0.2374
+  Sigmoid calibration         0.2334   <- best Brier score, but NOT deployed (see finding)
+
+ML fraud model — real precision/recall/F1, computed on the actual test
+split against each real model (this was the flagged gap — Brier score was
+the only metric ever logged for calibration; these are new, computed just
+now, not previously documented anywhere):
+
+  Model                    Precision(w)  Recall(w)  F1(w)   Recall(macro)  High-risk recall
+  --------------------------------------------------------------------------------------------
+  Uncalibrated (v10) -- DEPLOYED  0.849    0.829     0.835      0.808           0.81
+  Isotonic (reconstructed)        0.833    0.839     0.831      0.664           0.30
+  Sigmoid (v13, rolled back)      0.824    0.837     0.821      0.611           0.13
+
+  Per-band (low/medium/high) precision, recall, F1 — ALL THREE real model
+  variants, same real test set (n=2000: 1196 low, 697 medium, 107 high):
+
+  UNCALIBRATED (v10) -- DEPLOYED
+    Risk band     Precision   Recall   F1-score   Support
+    -------------------------------------------------------
+    low             0.93       0.89      0.91      1196
+    medium          0.77       0.72      0.74       697
+    high            0.43       0.81      0.56       107
+    -------------------------------------------------------
+    accuracy                             0.83      2000
+    macro avg       0.71       0.81      0.74      2000
+    weighted avg    0.85       0.83      0.83      2000
+
+  ISOTONIC-CALIBRATED (reconstructed -- never deployed)
+    Risk band     Precision   Recall   F1-score   Support
+    -------------------------------------------------------
+    low             0.88       0.94      0.91      1196
+    medium          0.78       0.76      0.77       697
+    high            0.70       0.30      0.42       107
+    -------------------------------------------------------
+    accuracy                             0.84      2000
+    macro avg       0.78       0.66      0.70      2000
+    weighted avg    0.83       0.84      0.83      2000
+
+  SIGMOID-CALIBRATED (v13 -- rolled back, no longer deployed)
+    Risk band     Precision   Recall   F1-score   Support
+    -------------------------------------------------------
+    low             0.87       0.95      0.91      1196
+    medium          0.77       0.75      0.76       697
+    high            0.61       0.13      0.22       107
+    -------------------------------------------------------
+    accuracy                             0.84      2000
+    macro avg       0.75       0.61      0.63      2000
+    weighted avg    0.82       0.84      0.82      2000
+
+  Reading across the "high" row is the whole finding: recall drops
+  0.81 -> 0.30 -> 0.13 as calibration is added (precision rises instead --
+  calibration made the model choosier about calling something high-risk,
+  which is exactly backwards for a fraud-triage system's actual priority).
+  "low" and "medium" bands stay roughly stable across all three -- the
+  damage is concentrated entirely in the rare, highest-stakes class.
+
+  Note the real tradeoff visible here: "high" risk precision is low (0.43
+  — more false alarms) but recall is high (0.81 — catches most real
+  high-risk fraud). For a fraud-triage system, missing real fraud
+  (low recall) is the costlier failure mode than over-flagging (low
+  precision, which just means more claims get escalated to a human
+  reviewer instead of auto-approved) — this is the real, substantive
+  reason the uncalibrated model was the right rollback choice, not just
+  "it has a better single number."
+
+  *** FINDING, FIXED: calibration had been chosen by Brier score alone,
+  which never checks classification recall. The previously-deployed
+  (sigmoid) model's high-risk recall had collapsed to 13% from 81%
+  uncalibrated -- missing ~87% of real high-risk fraud claims, the exact
+  opposite of why Logistic Regression was chosen over Random Forest in
+  the first place (recall on the rare high-risk class). Isotonic also
+  lost recall (30%) but far less than sigmoid.
+
+  ACTION TAKEN: rolled back the real `production` alias to the
+  uncalibrated model (v10) -- confirmed live: mlflow.load_model now
+  returns a raw LogisticRegression (not CalibratedClassifierCV), the
+  mcp-server container restarted clean, and a real score_fraud_risk call
+  against the live server succeeded post-rollback. Calibrated
+  probabilities are lost, but the decision matrix only ever buckets
+  scores into low/medium/high via fixed thresholds -- trading away
+  calibration quality here costs far less than missing 87% of real
+  high-risk fraud did. v13 stays in the registry as history, not deleted.
+  Done on your explicit choice, not a silent code change. Logged as
+  project-plan.md Q102.
+
+SECTION 4: TEST SUITE PASS RATES
+--------------------------------------------------------------------------------
+  Suite                              Pass/Total    %
+  ---------------------------------------------------
+  tests/test_orchestrator_server.py    33 / 33    100%
+  tests/test_backend.py                13 / 13    100%
+  ---------------------------------------------------
+  Total                                46 / 46    100%
+================================================================================

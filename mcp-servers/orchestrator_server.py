@@ -332,6 +332,9 @@ def ensure_local_infra() -> None:
                 )
                 """
             )
+            # project-plan.md Q100: see infra/init.sql's comment on this
+            # same column.
+            cur.execute("ALTER TABLE review_queue ADD COLUMN IF NOT EXISTS customer_notified_at TIMESTAMPTZ")
             # project-plan.md Q97 -- also created via infra/init.sql for a
             # fresh container, mirrored here for the same reason
             # customer_profiles/review_queue are: an already-initialized
@@ -364,6 +367,20 @@ def ensure_local_infra() -> None:
                     order_ref TEXT PRIMARY KEY,
                     order_date TIMESTAMPTZ NOT NULL,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+            # project-plan.md Q99: which real DummyJSON orders a customer
+            # owns (see _get_or_seed_customer_orders's docstring above).
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS customer_orders (
+                    customer_ref TEXT NOT NULL REFERENCES customers(customer_ref),
+                    order_ref TEXT NOT NULL,
+                    product_title TEXT NOT NULL,
+                    amount_usd NUMERIC(10, 2) NOT NULL DEFAULT 0,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    PRIMARY KEY (customer_ref, order_ref)
                 )
                 """
             )
@@ -431,6 +448,172 @@ def get_order(order_ref: str) -> dict:
         "delivery_status": "delivered",  # DummyJSON has no shipment status; static for this slice
         "category": None,  # set by the claim, not the order — filled in by the Orchestrator agent
     }
+
+
+# project-plan.md Q99: a real DummyJSON cart ID range, checked for real
+# (GET https://dummyjson.com/carts?limit=0 -> {"total": 208}), not
+# assumed -- earlier code in this project had assumed a much smaller
+# range. Sampling from 1..208 with a retry loop (rather than a fixed
+# curated list) means it stays correct even if DummyJSON's own seed data
+# size changes.
+_DUMMYJSON_CART_ID_MAX = 208
+_CUSTOMER_ORDERS_PER_CUSTOMER = 3
+# project-plan.md Q99 (revised): DummyJSON's real carts range from a few
+# dollars to over $130,000 (some bundle high-quantity motorcycles/jewelry) --
+# realistic for a returns-fraud demo means keeping seeded orders in a
+# plausible everyday-purchase range. Checked for real, not guessed: a random
+# 40-cart sample came back 15/40 (~37%) under $1000, so a generous retry
+# budget (20x, not 5x) is needed to reliably find 3 qualifying carts per
+# customer without silently under-filling someone's order list.
+_MAX_ORDER_AMOUNT_USD = 1000
+# project-plan.md Q101: the refund policy's real "Return window" clause
+# (docs/refund_policy.md) -- standard claims must be filed within 30 days
+# of delivery. Used here as the real, deterministic boundary for whether a
+# seeded order counts as "returnable" -- a claim's actual category-specific
+# window (e.g. Change of Mind's shorter 14-day sub-window) is still applied
+# by the real Decision Agent once a category is chosen, since that's not
+# knowable at order-seeding time.
+_RETURN_WINDOW_DAYS = 30
+
+
+def _days_since_order(order_date_iso: str) -> int:
+    order_date = datetime.fromisoformat(order_date_iso)
+    return (datetime.now(timezone.utc) - order_date).days
+
+
+def _is_returnable(order_date_iso: str) -> bool:
+    return _days_since_order(order_date_iso) <= _RETURN_WINDOW_DAYS
+
+
+def _sample_qualifying_order(accepted_refs: set, want_returnable, max_attempts: int):
+    """project-plan.md Q101: one candidate DummyJSON cart passing the real
+    amount filter (Q99) and, when want_returnable isn't None, matching the
+    requested side of the real 30-day return window -- used to guarantee a
+    customer's seeded orders include at least one of each (see
+    _get_or_seed_customer_orders). Rejected candidates are NOT added to
+    accepted_refs, so a cart rejected here for being the wrong side of the
+    window is still fair game for a later call wanting that exact side --
+    accepted_refs only tracks orders actually placed in the final set, to
+    avoid the same order_ref being "won" twice."""
+    for _ in range(max_attempts):
+        candidate = str(random.randint(1, _DUMMYJSON_CART_ID_MAX))
+        if candidate in accepted_refs:
+            continue
+        try:
+            cart = _fetch_cart(candidate)
+        except requests.HTTPError:
+            continue
+        first_product = cart["products"][0] if cart.get("products") else {}
+        title = first_product.get("title")
+        amount = cart.get("total", 0)
+        if not title or amount >= _MAX_ORDER_AMOUNT_USD:
+            continue
+        order_date_iso = _get_or_seed_order_date(candidate)
+        returnable = _is_returnable(order_date_iso)
+        if want_returnable is not None and returnable != want_returnable:
+            continue
+        return (candidate, title, amount, order_date_iso, returnable)
+    return None
+
+
+def _get_or_seed_customer_orders(customer_ref: str) -> list[dict]:
+    """project-plan.md Q99/Q101: bootstrap-and-persist which real DummyJSON
+    orders a given customer_ref "owns" -- the same pattern
+    get_account_info (Q59) and _get_or_seed_order_date (Q98) already
+    established, just for order ownership instead of account/order
+    metadata. There was previously no ownership concept anywhere in this
+    system: order_ref was a free-typed value any customer could submit for
+    any order.
+
+    The first call for a given customer_ref samples exactly
+    _CUSTOMER_ORDERS_PER_CUSTOMER orders, guaranteeing at least one
+    "returnable" (real order_date within the last _RETURN_WINDOW_DAYS) and
+    at least one "not returnable" (outside it) -- two dedicated sampling
+    phases secure one of each first, then any remaining slot is filled with
+    an unconstrained draw. Persists the winners; every later call returns
+    the same stored order_refs, but re-derives returnable/days_since_order
+    fresh from the real, unchanging order_date each time (never a stored,
+    staling boolean) -- an order genuinely can cross the 30-day line
+    between two calls, purely because time passed."""
+    with _pg_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT co.order_ref, co.product_title, co.amount_usd, om.order_date "
+                "FROM customer_orders co JOIN order_metadata om ON om.order_ref = co.order_ref "
+                "WHERE co.customer_ref = %s ORDER BY co.order_ref",
+                (customer_ref,),
+            )
+            rows = cur.fetchall()
+            if rows:
+                return [
+                    {
+                        "order_ref": r[0], "product_title": r[1], "amount_usd": float(r[2]),
+                        "order_date": r[3].isoformat(), "returnable": _is_returnable(r[3].isoformat()),
+                        "days_since_order": _days_since_order(r[3].isoformat()),
+                    }
+                    for r in rows
+                ]
+
+            accepted_refs: set[str] = set()
+            accepted: list[tuple] = []
+            budget = _CUSTOMER_ORDERS_PER_CUSTOMER * 20
+
+            returnable_pick = _sample_qualifying_order(accepted_refs, True, budget)
+            if returnable_pick:
+                accepted.append(returnable_pick)
+                accepted_refs.add(returnable_pick[0])
+
+            not_returnable_pick = _sample_qualifying_order(accepted_refs, False, budget)
+            if not_returnable_pick:
+                accepted.append(not_returnable_pick)
+                accepted_refs.add(not_returnable_pick[0])
+
+            while len(accepted) < _CUSTOMER_ORDERS_PER_CUSTOMER:
+                extra = _sample_qualifying_order(accepted_refs, None, budget)
+                if extra is None:
+                    break
+                accepted.append(extra)
+                accepted_refs.add(extra[0])
+
+            for order_ref, title, amount, _order_date_iso, _returnable in accepted:
+                cur.execute(
+                    "INSERT INTO customer_orders (customer_ref, order_ref, product_title, amount_usd) "
+                    "VALUES (%s, %s, %s, %s)",
+                    (customer_ref, order_ref, title, amount),
+                )
+        conn.commit()
+    return [
+        {
+            "order_ref": o, "product_title": t, "amount_usd": float(a),
+            "order_date": d, "returnable": r, "days_since_order": _days_since_order(d),
+        }
+        for o, t, a, d, r in accepted
+    ]
+
+
+@mcp.tool
+def get_days_to_return(order_ref: str) -> int:
+    """project-plan.md Q101: the real, current elapsed days since this
+    order's real (bootstrap-seeded, Q98) order_date -- the actual value
+    backend/main.py now uses as the Fraud Scoring/Decision Agent input
+    that used to be the customer's own self-reported estimate. Replaces
+    that self-report entirely rather than merely cross-checking it: once
+    an order_ref is confirmed to be one of the customer's own real orders
+    (Q99's ownership enforcement), its order_date is already known and
+    trustworthy, so there's no remaining reason to ask the customer and
+    risk a wrong or dishonest answer."""
+    order_date_iso = _get_or_seed_order_date(order_ref)
+    return _days_since_order(order_date_iso)
+
+
+@mcp.tool
+def list_customer_orders(customer_ref: str) -> list[dict]:
+    """The Customer Chat Frontend's real data source for the "which order
+    is this about?" dropdown (project-plan.md Q99) -- returns the specific
+    orders THIS customer_ref owns, not every DummyJSON cart. See
+    _get_or_seed_customer_orders's docstring for how ownership is
+    established (bootstrap-sampled once, then stable)."""
+    return _get_or_seed_customer_orders(customer_ref)
 
 
 @mcp.tool

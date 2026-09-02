@@ -74,7 +74,10 @@ def require_reviewer(x_reviewer_password: str = Header(default="")) -> None:
     if not REVIEWER_PASSWORD or x_reviewer_password != REVIEWER_PASSWORD:
         raise HTTPException(status_code=401, detail="Invalid or missing reviewer password.")
 
-_INTAKE_FIELDS = ("order_ref", "claim_category", "claim_description", "days_to_return")
+# project-plan.md Q101: days_to_return dropped -- no longer customer-
+# provided at all (see _real_days_to_return below, and orchestrator_
+# agent.py's build_intake_task, which no longer asks for it).
+_INTAKE_FIELDS = ("order_ref", "claim_category", "claim_description")
 
 
 class ClaimRequest(BaseModel):
@@ -82,7 +85,6 @@ class ClaimRequest(BaseModel):
     order_ref: str
     claim_category: ClaimCategory
     claim_description: str
-    days_to_return: int = Field(..., ge=0)
 
 
 class ClaimResponse(BaseModel):
@@ -144,6 +146,34 @@ def _resolve_customer_ref(customer_identifier: str) -> str:
     with orchestrator_mcp_adapter() as tools:
         resolve = next(t for t in tools if t.name == "resolve_customer_ref")
         return resolve.run(customer_id_or_email=customer_identifier)
+
+
+def _order_belongs_to_customer(customer_ref: str, order_ref: str) -> bool:
+    """project-plan.md Q101: order_ref may only ever be one of this
+    customer's own real, bootstrap-seeded orders (Q99's customer_orders
+    table) -- checked directly against Postgres, not just trusted from
+    whatever the frontend's dropdown happened to send, since the same
+    guarantee has to hold for any caller of these endpoints, not only a
+    well-behaved browser session that only ever offers real choices."""
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM customer_orders WHERE customer_ref = %s AND order_ref = %s",
+                (customer_ref, order_ref),
+            )
+            return cur.fetchone() is not None
+
+
+def _real_days_to_return(order_ref: str) -> int:
+    """project-plan.md Q101: replaces the customer's own self-reported
+    "how many days ago" entirely -- once order_ref is confirmed to be a
+    real order this customer owns (_order_belongs_to_customer above), its
+    real order_date is already known and trustworthy via get_days_to_return,
+    so there's no remaining reason to ask and risk a wrong or dishonest
+    answer feeding the fraud model and Decision Agent."""
+    with orchestrator_mcp_adapter() as tools:
+        get_days = next(t for t in tools if t.name == "get_days_to_return")
+        return int(get_days.run(order_ref=order_ref))
 
 
 def _build_claim_response(s: ClaimState) -> ClaimResponse:
@@ -252,17 +282,29 @@ def tool_registry() -> dict:
 @app.post("/claims", response_model=ClaimResponse)
 def submit_claim(request: ClaimRequest) -> ClaimResponse:
     customer_ref = _resolve_customer_ref(request.customer_identifier)
+    if not _order_belongs_to_customer(customer_ref, request.order_ref):
+        raise HTTPException(
+            status_code=400,
+            detail=f"order_ref={request.order_ref!r} is not one of this customer's own orders (project-plan.md Q101).",
+        )
     _check_rate_limit(customer_ref)
     claim_ref = f"clm_{uuid.uuid4().hex[:10]}"
+    days_to_return = _real_days_to_return(request.order_ref)
     return _run_claim(
         claim_ref, request.customer_identifier, customer_ref, request.order_ref, request.claim_category,
-        request.claim_description, request.days_to_return,
+        request.claim_description, days_to_return,
     )
 
 
 class MessageRequest(BaseModel):
     customer_identifier: str
     message: str
+    order_ref: Optional[str] = Field(
+        default=None,
+        description="Q99: set when the customer picked an order from the frontend's dropdown "
+        "(list_customer_orders) instead of describing it in free text -- takes priority over "
+        "whatever the intake LLM would otherwise try to extract from the message.",
+    )
 
 
 class MessageResponse(BaseModel):
@@ -304,7 +346,7 @@ def _get_or_mint_claim_ref(customer_ref: str, prior_state: dict) -> str:
     return claim_ref
 
 
-def _process_message(customer_identifier: str, message: str) -> MessageResponse:
+def _process_message(customer_identifier: str, message: str, order_ref: Optional[str] = None) -> MessageResponse:
     """Shared by POST /messages and the Twilio webhook (Q76) -- one real
     intake pipeline behind both entry points, not a duplicated copy for
     WhatsApp."""
@@ -322,6 +364,27 @@ def _process_message(customer_identifier: str, message: str) -> MessageResponse:
     claim_ref = _get_or_mint_claim_ref(customer_ref, prior_state)
     known_fields = {field: prior_state.get(field) for field in _INTAKE_FIELDS}
 
+    # project-plan.md Q101: order_ref may ONLY ever come from here -- the
+    # dropdown-selected value on this turn, or an already-validated value
+    # persisted from an earlier turn -- never from the intake LLM's own
+    # extraction of the message text (build_intake_task no longer even
+    # asks it to try). A customer typing a different order number in free
+    # text has no effect on which order the claim is actually filed
+    # against.
+    if order_ref:
+        if not _order_belongs_to_customer(customer_ref, order_ref):
+            return MessageResponse(
+                needs_more_info=True,
+                follow_up_question="That doesn't look like one of your orders. Please pick one from the dropdown above.",
+                request_type="new_claim",
+            )
+        known_fields["order_ref"] = order_ref
+    elif known_fields.get("order_ref") and not _order_belongs_to_customer(customer_ref, known_fields["order_ref"]):
+        # Defensive re-check of persisted state, not just a first-write
+        # check -- cheap (one indexed lookup) and keeps the guarantee an
+        # invariant rather than a one-time gate.
+        known_fields["order_ref"] = None
+
     with orchestrator_mcp_adapter() as tools:
         agent = build_orchestrator_agent(tools, customer_ref, claim_ref)
         task = build_intake_task(agent, message, known_fields)
@@ -332,21 +395,27 @@ def _process_message(customer_identifier: str, message: str) -> MessageResponse:
         return MessageResponse(needs_more_info=False, request_type="general_inquiry")
 
     merged = dict(known_fields)
-    for field in _INTAKE_FIELDS:
+    for field in ("claim_category", "claim_description"):
         value = getattr(intake, field)
         if value is not None:
             merged[field] = value
 
     missing = [field for field in _INTAKE_FIELDS if merged.get(field) is None]
     if missing:
+        follow_up = (
+            "Please select which order this is about from the dropdown above, then tell me what happened."
+            if "order_ref" in missing
+            else intake.follow_up_question
+        )
         _put_conversation_state(customer_ref, {**merged, "claim_status": "awaiting_details", "claim_ref": claim_ref})
         return MessageResponse(
-            needs_more_info=True, follow_up_question=intake.follow_up_question, request_type=intake.request_type,
+            needs_more_info=True, follow_up_question=follow_up, request_type=intake.request_type,
         )
 
+    days_to_return = _real_days_to_return(merged["order_ref"])
     claim_result = _run_claim(
         claim_ref, customer_identifier, customer_ref, merged["order_ref"], merged["claim_category"],
-        merged["claim_description"], int(merged["days_to_return"]),
+        merged["claim_description"], days_to_return,
     )
     # re_prompt_for_photo means the claim is NOT done -- the Flow is still
     # waiting on the customer, same as needs_more_info above, just
@@ -372,7 +441,77 @@ def _process_message(customer_identifier: str, message: str) -> MessageResponse:
 
 @app.post("/messages", response_model=MessageResponse)
 def submit_message(request: MessageRequest) -> MessageResponse:
-    return _process_message(request.customer_identifier, request.message)
+    return _process_message(request.customer_identifier, request.message, request.order_ref)
+
+
+class OrdersRequest(BaseModel):
+    customer_identifier: str
+
+
+class OrderOption(BaseModel):
+    order_ref: str
+    product_title: str
+    amount_usd: float
+    order_date: str
+    returnable: bool
+    days_since_order: int
+
+
+@app.post("/orders", response_model=list[OrderOption])
+def list_orders(request: OrdersRequest) -> list[OrderOption]:
+    """Q99: the Customer Chat Frontend's real data source for the "which
+    order is this about?" dropdown -- customer_identifier in the request
+    body (never a URL path/query param), same PII-conscious convention
+    POST /messages already uses. Resolves to customer_ref server-side and
+    calls the real list_customer_orders MCP tool; only that customer's own
+    (bootstrap-seeded, Q99) orders come back. Each includes a real
+    returnable flag (Q101: real order_date vs. the refund policy's 30-day
+    return window), not just the raw order facts -- the seeded set always
+    has at least one of each side."""
+    customer_ref = _resolve_customer_ref(request.customer_identifier)
+    with orchestrator_mcp_adapter() as tools:
+        list_orders_tool = next(t for t in tools if t.name == "list_customer_orders")
+        orders = _parse_tool_result(list_orders_tool.run(customer_ref=customer_ref)) or []
+    return [OrderOption(**o) for o in orders]
+
+
+class ClaimUpdate(BaseModel):
+    claim_ref: str
+    order_ref: str
+    status: str  # "approved" or "denied" -- review_queue's own vocabulary (Q72), distinct from ClaimResponse.outcome's
+    refund_amount_usd: float
+    transaction_id: Optional[str] = None
+
+
+@app.post("/claim-updates", response_model=list[ClaimUpdate])
+def get_claim_updates(request: OrdersRequest) -> list[ClaimUpdate]:
+    """Q100: how the customer finds out a human reviewer approved/denied
+    their escalated claim -- the Reviewer Dashboard's decide endpoint
+    doesn't (and, as a Streamlit app with no server-push/websocket, can't)
+    notify the customer at the moment a reviewer acts. Instead, the
+    Customer Chat Frontend polls this endpoint on every render; a decision
+    is only ever returned once -- customer_notified_at is set to now() in
+    the same request that returns it, so re-polling (which happens on
+    every Streamlit rerun) doesn't re-announce an already-shown decision."""
+    customer_ref = _resolve_customer_ref(request.customer_identifier)
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT claim_ref, order_ref, status, refund_amount_usd, transaction_id FROM review_queue "
+                "WHERE customer_ref = %s AND status IN ('approved', 'denied') AND customer_notified_at IS NULL",
+                (customer_ref,),
+            )
+            rows = cur.fetchall()
+            if rows:
+                cur.execute(
+                    "UPDATE review_queue SET customer_notified_at = now() WHERE claim_ref = ANY(%s)",
+                    ([r[0] for r in rows],),
+                )
+        conn.commit()
+    return [
+        ClaimUpdate(claim_ref=r[0], order_ref=r[1], status=r[2], refund_amount_usd=float(r[3]), transaction_id=r[4])
+        for r in rows
+    ]
 
 
 class PhotoUploadResponse(BaseModel):

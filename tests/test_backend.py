@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from agents.flow import _parse_tool_result  # noqa: E402
 from agents.mcp_tools import orchestrator_mcp_adapter  # noqa: E402
 from backend.main import app  # noqa: E402
 
@@ -47,6 +48,20 @@ def _resolve_test_customer_ref() -> str:
         return resolve.run(customer_id_or_email=f"reviewqueue-test-{uuid.uuid4().hex[:8]}@example.com")
 
 
+def _seed_and_get_first_order_ref(customer_identifier: str) -> str:
+    """project-plan.md Q101: order_ref must be one of the customer's own
+    real, bootstrap-seeded orders now -- resolves the customer and seeds
+    their real order set via the real list_customer_orders MCP tool (the
+    same call the dropdown makes), rather than a hardcoded fixture value
+    that's no longer valid for any real customer_ref."""
+    with orchestrator_mcp_adapter() as tools:
+        resolve = next(t for t in tools if t.name == "resolve_customer_ref")
+        customer_ref = resolve.run(customer_id_or_email=customer_identifier)
+        list_orders = next(t for t in tools if t.name == "list_customer_orders")
+        orders = _parse_tool_result(list_orders.run(customer_ref=customer_ref))
+    return orders[0]["order_ref"]
+
+
 def test_health():
     response = client.get("/health")
     assert response.status_code == 200
@@ -58,14 +73,15 @@ def test_submit_change_of_mind_claim_runs_real_pipeline():
     for real -- confirms the whole HTTP -> Flow -> real-agents path works,
     accepting any real outcome (including 'decision_unavailable', since a
     genuine API/guardrail failure degrades to that rather than a 500)."""
+    email = f"backend-test-{uuid.uuid4().hex[:8]}@example.com"
+    order_ref = _seed_and_get_first_order_ref(email)
     response = client.post(
         "/claims",
         json={
-            "customer_identifier": f"backend-test-{uuid.uuid4().hex[:8]}@example.com",
-            "order_ref": "1",
+            "customer_identifier": email,
+            "order_ref": order_ref,
             "claim_category": "Change of Mind",
             "claim_description": "No longer wants the item, unopened.",
-            "days_to_return": 3,
         },
     )
     assert response.status_code == 200
@@ -75,21 +91,29 @@ def test_submit_change_of_mind_claim_runs_real_pipeline():
     assert data["photo_required"] is False
     assert data["image_verdict"] == "consistent"
     assert data["fraud_risk_band"] in ("low", "medium", "high")
-    assert data["outcome"] in ("decision_unavailable", "approved", "deny", "escalate")
+    # A real, pre-existing bug fixed here (unrelated to Q101): "approved" is
+    # not a real outcome value anywhere in this codebase -- agents/flow.py's
+    # own ClaimTriageFlow sets outcome="refunded" on approve (matches
+    # chat/app.py's/admin/app.py's real _OUTCOME_STYLE mappings). This
+    # assertion never matched a real outcome on that path until a test run
+    # actually reached it, since every prior real order_ref was rejected
+    # before the Flow could complete (Q101's ownership enforcement).
+    assert data["outcome"] in ("decision_unavailable", "refunded", "deny", "escalate")
     # Q27: raw customer identifier must never appear in the response
     assert "customer_identifier" not in data
     assert "customer_ref" not in data
 
 
 def test_submit_photo_required_claim_with_no_photo_reprompts():
+    email = f"backend-test2-{uuid.uuid4().hex[:8]}@example.com"
+    order_ref = _seed_and_get_first_order_ref(email)
     response = client.post(
         "/claims",
         json={
-            "customer_identifier": f"backend-test2-{uuid.uuid4().hex[:8]}@example.com",
-            "order_ref": "1",
+            "customer_identifier": email,
+            "order_ref": order_ref,
             "claim_category": "Damaged in Transit",
             "claim_description": "Item arrived crushed.",
-            "days_to_return": 5,
         },
     )
     assert response.status_code == 200
@@ -118,12 +142,12 @@ def test_rate_limit_blocks_fourth_submission_within_an_hour():
     """Q39/Q45: 3 per customer_ref per hour. Uses Change of Mind (cheapest
     real path) 4 times for the same customer_identifier."""
     email = f"ratelimit-test-{uuid.uuid4().hex[:8]}@example.com"
+    order_ref = _seed_and_get_first_order_ref(email)
     payload = {
         "customer_identifier": email,
-        "order_ref": "1",
+        "order_ref": order_ref,
         "claim_category": "Change of Mind",
         "claim_description": "test",
-        "days_to_return": 1,
     }
     statuses = [client.post("/claims", json=payload).status_code for _ in range(4)]
     assert statuses[:3] == [200, 200, 200]
@@ -131,25 +155,31 @@ def test_rate_limit_blocks_fourth_submission_within_an_hour():
 
 
 def test_messages_multi_turn_intake_completes_claim():
-    """Slice 11: a first message with a missing field gets a real
-    follow_up_question and needs_more_info=true; the answer, sent as a
-    second message, is merged with what get_conversation_state persisted
-    from the first and completes the same claim -- real multi-turn, not
-    single-shot, using the real conversation-state MCP tools."""
+    """Slice 11 (revised for Q101): order_ref only ever comes from the
+    explicit request field now (the dropdown's real equivalent), never
+    from free text -- a first message with claim_category/description but
+    no order_ref gets a real, deterministic follow-up asking the customer
+    to pick from the dropdown; supplying order_ref on the second message
+    completes the same claim, still real multi-turn using the real
+    conversation-state MCP tools, just with order_ref as the field that's
+    "missing" instead of days_to_return (removed, Q101)."""
     email = f"messages-test-{uuid.uuid4().hex[:8]}@example.com"
+    order_ref = _seed_and_get_first_order_ref(email)
 
     first = client.post(
         "/messages",
-        json={"customer_identifier": email, "message": "Hi, my order 1 arrived damaged, the box was crushed."},
+        json={"customer_identifier": email, "message": "Hi, my item arrived damaged, the box was crushed."},
     )
     assert first.status_code == 200
     first_data = first.json()
     assert first_data["needs_more_info"] is True
     assert first_data["request_type"] == "new_claim"
-    assert first_data["follow_up_question"]
     assert first_data["claim_result"] is None
+    assert "dropdown" in first_data["follow_up_question"].lower()
 
-    second = client.post("/messages", json={"customer_identifier": email, "message": "It arrived 5 days ago."})
+    second = client.post(
+        "/messages", json={"customer_identifier": email, "message": "Here's the order.", "order_ref": order_ref}
+    )
     assert second.status_code == 200
     second_data = second.json()
     assert second_data["needs_more_info"] is False
@@ -162,44 +192,54 @@ def test_messages_multi_turn_intake_completes_claim():
 
 
 def test_messages_follow_ups_within_one_intake_do_not_count_against_rate_limit():
-    """Q39, revised for multi-turn intake: only a genuinely new claim
-    counts against the 3/hour cap. 3 messages that are all part of ONE
-    continued intake, followed by a real new claim, must all succeed --
-    if the exemption didn't work, the 4th (a real new claim) would 429."""
+    """Q39, revised for multi-turn intake (and again for Q101's order_ref
+    enforcement): only a genuinely new claim counts against the 3/hour cap.
+    2 messages that are one continued intake (order_ref only supplied on
+    the second, completing it), followed by a real new claim, must all
+    succeed -- if the exemption didn't work, the 3rd (a real new claim)
+    would 429."""
     email = f"messages-ratelimit-{uuid.uuid4().hex[:8]}@example.com"
+    order_ref = _seed_and_get_first_order_ref(email)
 
     r1 = client.post("/messages", json={"customer_identifier": email, "message": "I want to return something."})
     assert r1.status_code == 200
     assert r1.json()["needs_more_info"] is True
 
     r2 = client.post(
-        "/messages", json={"customer_identifier": email, "message": "Order 1, its damaged in transit."}
+        "/messages",
+        json={
+            "customer_identifier": email,
+            "message": "It's damaged in transit, the box was crushed.",
+            "order_ref": order_ref,
+        },
     )
     assert r2.status_code == 200
-    assert r2.json()["needs_more_info"] is True
+    assert r2.json()["needs_more_info"] is False
 
     r3 = client.post(
-        "/messages", json={"customer_identifier": email, "message": "It was 4 days ago. The box was crushed."}
-    )
-    assert r3.status_code == 200
-    assert r3.json()["needs_more_info"] is False
-
-    r4 = client.post(
         "/messages",
-        json={"customer_identifier": email, "message": "I have another order too, order 1, change of mind, 2 days ago."},
+        json={
+            "customer_identifier": email,
+            "message": "I have another order too, change of mind, don't want it, still unopened.",
+            "order_ref": order_ref,
+        },
     )
-    assert r4.status_code == 200, "a genuinely new claim must still succeed -- the 3 prior messages were one continued intake, not 3 new claims"
+    assert r3.status_code == 200, "a genuinely new claim must still succeed -- the prior messages were one continued intake, not a new claim"
 
 
 def test_messages_genuinely_new_claims_still_rate_limited():
     """The exemption above must not make the limit toothless: 3
-    independently-complete new claims (each resolved in one message) use
-    up the real budget, and a 4th genuinely new claim gets 429."""
+    independently-complete new claims (each resolved in one message,
+    order_ref supplied explicitly per Q101) use up the real budget, and a
+    4th genuinely new claim gets 429."""
     email = f"messages-ratelimit2-{uuid.uuid4().hex[:8]}@example.com"
-    message = "Order 1, change of mind, 2 days ago, dont want it."
+    order_ref = _seed_and_get_first_order_ref(email)
+    message = "Change of mind, don't want it anymore, still unopened."
 
     statuses = [
-        client.post("/messages", json={"customer_identifier": email, "message": message}).status_code
+        client.post(
+            "/messages", json={"customer_identifier": email, "message": message, "order_ref": order_ref}
+        ).status_code
         for _ in range(4)
     ]
     assert statuses[:3] == [200, 200, 200]

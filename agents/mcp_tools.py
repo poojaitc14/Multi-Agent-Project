@@ -26,8 +26,8 @@ MCP_SERVER_URL = (
 )
 
 ORCHESTRATOR_TOOLS = (
-    "resolve_customer_ref", "get_order", "issue_refund", "get_conversation_state",
-    "put_conversation_state", "store_photo", "get_photo", "store_transcript",
+    "resolve_customer_ref", "get_order", "list_customer_orders", "get_days_to_return", "issue_refund",
+    "get_conversation_state", "put_conversation_state", "store_photo", "get_photo", "store_transcript",
 )
 IMAGE_PARSING_TOOLS = ("analyze_claim_photo",)
 FRAUD_SCORING_TOOLS = (
