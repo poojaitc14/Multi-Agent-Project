@@ -1,0 +1,41 @@
+{
+  "family": "fraud-triage-mcp-server",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "2048",
+  "executionRoleArn": "arn:aws:iam::666127452756:role/fraud-triage-task-execution-role",
+  "taskRoleArn": "arn:aws:iam::666127452756:role/fraud-triage-task-role",
+  "containerDefinitions": [
+    {
+      "name": "mcp-server",
+      "image": "<IMAGE1_NAME>",
+      "essential": true,
+      "portMappings": [{ "containerPort": 8001, "protocol": "tcp" }],
+      "environment": [
+        { "name": "AWS_DEFAULT_REGION", "value": "eu-west-2" },
+        { "name": "MCP_SERVER_PORT", "value": "8001" }
+      ],
+      "secrets": [
+        { "name": "DATABASE_URL", "valueFrom": "arn:aws:secretsmanager:eu-west-2:666127452756:secret:fraud-triage-app-secrets-pooja-dPNbbG:DATABASE_URL::" },
+        { "name": "CONVERSATION_STATE_TABLE", "valueFrom": "arn:aws:secretsmanager:eu-west-2:666127452756:secret:fraud-triage-app-secrets-pooja-dPNbbG:CONVERSATION_STATE_TABLE::" },
+        { "name": "CLAIM_PHOTOS_BUCKET", "valueFrom": "arn:aws:secretsmanager:eu-west-2:666127452756:secret:fraud-triage-app-secrets-pooja-dPNbbG:CLAIM_PHOTOS_BUCKET::" },
+        { "name": "TRANSCRIPTS_BUCKET", "valueFrom": "arn:aws:secretsmanager:eu-west-2:666127452756:secret:fraud-triage-app-secrets-pooja-dPNbbG:TRANSCRIPTS_BUCKET::" },
+        { "name": "CLAIM_FREQUENCY_TABLE", "valueFrom": "arn:aws:secretsmanager:eu-west-2:666127452756:secret:fraud-triage-app-secrets-pooja-dPNbbG:CLAIM_FREQUENCY_TABLE::" },
+        { "name": "AZURE_OPENAI_API_KEY", "valueFrom": "arn:aws:secretsmanager:eu-west-2:666127452756:secret:fraud-triage-azure-secrets-pooja-rbzytv:AZURE_OPENAI_API_KEY::" },
+        { "name": "AZURE_OPENAI_ENDPOINT", "valueFrom": "arn:aws:secretsmanager:eu-west-2:666127452756:secret:fraud-triage-azure-secrets-pooja-rbzytv:AZURE_OPENAI_ENDPOINT::" },
+        { "name": "AZURE_OPENAI_API_VERSION", "valueFrom": "arn:aws:secretsmanager:eu-west-2:666127452756:secret:fraud-triage-azure-secrets-pooja-rbzytv:AZURE_OPENAI_API_VERSION::" },
+        { "name": "AZURE_OPENAI_DEPLOYMENT_NAME", "valueFrom": "arn:aws:secretsmanager:eu-west-2:666127452756:secret:fraud-triage-azure-secrets-pooja-rbzytv:AZURE_OPENAI_DEPLOYMENT_NAME::" },
+        { "name": "ORCHESTRATOR_MCP_TOKEN", "valueFrom": "arn:aws:secretsmanager:eu-west-2:666127452756:secret:fraud-triage-mcp-secrets-pooja-ZklOKK:ORCHESTRATOR_MCP_TOKEN::" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/fraud-triage-mcp-server",
+          "awslogs-region": "eu-west-2",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ]
+}

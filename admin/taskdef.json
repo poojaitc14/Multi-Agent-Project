@@ -1,0 +1,31 @@
+{
+  "family": "fraud-triage-admin",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::666127452756:role/fraud-triage-task-execution-role",
+  "taskRoleArn": "arn:aws:iam::666127452756:role/fraud-triage-task-role",
+  "containerDefinitions": [
+    {
+      "name": "admin",
+      "image": "<IMAGE1_NAME>",
+      "essential": true,
+      "portMappings": [{ "containerPort": 8501, "protocol": "tcp" }],
+      "secrets": [
+        {
+          "name": "BACKEND_URL",
+          "valueFrom": "arn:aws:secretsmanager:eu-west-2:666127452756:secret:fraud-triage-app-secrets-pooja-dPNbbG:BACKEND_URL::"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/fraud-triage-admin",
+          "awslogs-region": "eu-west-2",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ]
+}
