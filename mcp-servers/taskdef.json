@@ -4,6 +4,7 @@
   "requiresCompatibilities": ["FARGATE"],
   "cpu": "1024",
   "memory": "2048",
+  "ephemeralStorage": { "sizeInGiB": 40 },
   "executionRoleArn": "arn:aws:iam::666127452756:role/fraud-triage-task-execution-role",
   "taskRoleArn": "arn:aws:iam::666127452756:role/fraud-triage-task-role",
   "containerDefinitions": [

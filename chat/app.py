@@ -28,7 +28,7 @@ load_dotenv()
 
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://127.0.0.1:8002")
 
-st.set_page_config(page_title="Fraud Triage Support", page_icon="💬", layout="centered")
+st.set_page_config(page_title="ReturnFlow AI Chat Assistant", page_icon="💬", layout="centered")
 
 # ---------------------------------------------------------------------------
 # Visual identity (project-plan.md Q94): a warm, calm "support desk" palette
@@ -170,7 +170,7 @@ def _identity_gate() -> bool:
         <div class="support-masthead">
           <div class="support-badge">FT</div>
           <div>
-            <div class="support-title">Fraud Triage Support</div>
+            <div class="support-title">ReturnFlow AI Chat Assistant</div>
             <div class="support-subtitle">Report a damaged, wrong, or unwanted item — get a real answer.</div>
           </div>
         </div>
@@ -348,7 +348,7 @@ def main() -> None:
         <div class="support-masthead">
           <div class="support-badge">FT</div>
           <div>
-            <div class="support-title">Fraud Triage Support</div>
+            <div class="support-title">ReturnFlow AI Chat Assistant</div>
             <div class="support-subtitle">Signed in as your email/customer ID — never shared with any AI model.</div>
           </div>
         </div>

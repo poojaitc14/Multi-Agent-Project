@@ -29,7 +29,7 @@ load_dotenv()
 
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://127.0.0.1:8002")
 
-st.set_page_config(page_title="Fraud Triage Admin", page_icon="🛡️", layout="wide")
+st.set_page_config(page_title="ReturnFlow AI Admin Assistant", page_icon="🛡️", layout="wide")
 
 # ---------------------------------------------------------------------------
 # Visual identity (project-plan.md Q94): a deliberately different, more
@@ -174,7 +174,7 @@ def _password_gate() -> bool:
         <div class="admin-masthead">
           <div class="admin-badge">FT</div>
           <div>
-            <div class="admin-title">Fraud Triage Admin</div>
+            <div class="admin-title">ReturnFlow AI Admin Assistant</div>
             <div class="admin-subtitle">reviewer console · internal only</div>
           </div>
         </div>
@@ -366,7 +366,7 @@ def main() -> None:
         <div class="admin-masthead">
           <div class="admin-badge">FT</div>
           <div>
-            <div class="admin-title">Fraud Triage Admin</div>
+            <div class="admin-title">ReturnFlow AI Admin Assistant</div>
             <div class="admin-subtitle">reviewer console · internal only</div>
           </div>
         </div>

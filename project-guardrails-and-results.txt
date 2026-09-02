@@ -169,4 +169,76 @@ clm_fraud_adversarial_, clm_adversarial_, clm_property_) and is excluded.
   several calls in this window ran 300-2400s and used 150K-630K tokens,
   against a typical call's 3K-35K tokens and under 90s. The median is the
   representative figure for a normal claim under stable conditions.
+
+SECTION 6: DATABASES & APIs
+--------------------------------------------------------------------------------
+PostgreSQL (RDS fraud-triage-db-pooja, db fraud_triage) -- 7 tables:
+
+  customers            The ONLY table holding a raw customer identifier
+                        (email) -- maps it to an opaque customer_ref.
+                        Nothing else ever reads the raw identifier back
+                        into an LLM's context.
+  order_metadata        Synthetic order_date per order_ref (DummyJSON
+                        carts have no real purchase date) -- bootstrap-
+                        seeded once, then stable.
+  customer_orders       Which real DummyJSON orders a customer_ref "owns"
+                        (3 per customer, seeded once) -- the chat
+                        frontend's order dropdown reads from here.
+  customer_profiles     Synthetic account-level fraud features (lifetime
+                        orders/returns, dispute count, address match,
+                        account age) -- seeded from a real row of the
+                        fraud training dataset.
+  claims                Complete log of every claim ClaimTriageFlow
+                        finishes -- category, description, refund amount,
+                        image verdict, risk band, decision, outcome.
+                        Upserted per claim_ref.
+  review_queue          Only outcome='escalate' claims -- what the Admin
+                        reviewer dashboard lists, plus customer_notified_at
+                        (set once the customer's been shown the decision).
+  refund_transactions   Real issued-refund records -- amount, reason,
+                        transaction ID, keyed by (order_ref, claim_ref).
+
+DynamoDB (2 tables):
+  conversation-state-dev   Multi-turn chat state.
+  claim-frequency-dev      Rate-limiting counters (max 3 claims/customer/hr).
+
+S3 (2 buckets):
+  claim-photos-dev      Uploaded claim photos.
+  chat-transcripts-dev  Chat transcripts.
+
+OpenSearch Serverless (refund-policy-dev collection):
+  Chunked + embedded docs/refund_policy.md -- what search_refund_policy's
+  hybrid retrieval queries.
+
+Secrets Manager (5 secrets): AWS creds, Azure OpenAI keys, 4 per-agent MCP
+bearer tokens, Langfuse keys, and app config (DATABASE_URL,
+REVIEWER_PASSWORD, table/bucket names, BACKEND_URL, MCP_SERVER_HOST/PORT).
+
+Backend REST API (FastAPI, backend/main.py):
+  GET  /health
+  POST /claims
+  POST /messages                (+ /messages/photo)
+  POST /orders
+  POST /claim-updates           customer polling for reviewer decisions
+  GET  /tool-registry           reviewer-only
+  GET  /claims                  reviewer-only, full claim log
+  GET  /review-queue            reviewer-only
+  POST /review-queue/{claim_ref}/decide   reviewer-only
+  POST /documents                reviewer-only, RAG doc ingest
+
+MCP tool server (mcp-servers/orchestrator_server.py, FastMCP) -- one shared
+server, 4 per-agent token-scoped tool sets:
+  Orchestrator     resolve_customer_ref, get_order, list_customer_orders,
+                   get_days_to_return, issue_refund (the only money-moving
+                   tool), get/put_conversation_state, store/get_photo,
+                   store_transcript
+  Image Parsing    analyze_claim_photo
+  Fraud Scoring    get_order, get_account_info, get_claim_frequency,
+                   increment_claim_frequency, get_tracking_status,
+                   score_fraud_risk
+  Decision         search_refund_policy, apply_decision_matrix
+
+External APIs: DummyJSON (fake order/product data), Azure OpenAI (GPT-4.1
+mini for all agents + embeddings for RAG), TrackingMore (shipment
+tracking, optional), Langfuse (observability).
 ================================================================================
